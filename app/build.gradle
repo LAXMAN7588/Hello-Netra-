@@ -1,0 +1,31 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.tencent.mobilenetssdncnn'
+    compileSdk 33
+    ndkVersion "27.2.12479018"
+
+    defaultConfig {
+        applicationId 'com.tencent.mobilenetssdncnn'
+        minSdk 24
+        targetSdk 33
+
+        ndk {
+            abiFilters 'armeabi-v7a', 'arm64-v8a'
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path file('src/main/jni/CMakeLists.txt')
+            version '3.22.1'
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+}

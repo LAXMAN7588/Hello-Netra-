@@ -1,0 +1,19 @@
+# Android / Gradle
+.gradle/
+**/build/
+local.properties
+
+# Android Studio
+.idea/
+*.iml
+
+# Native build
+.cxx/
+**/.cxx/
+
+# Generated APKs
+*.apk
+
+# OS
+.DS_Store
+Thumbs.db
