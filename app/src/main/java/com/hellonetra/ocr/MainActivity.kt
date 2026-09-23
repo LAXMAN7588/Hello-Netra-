@@ -62,6 +62,7 @@ class MainActivity : Activity() {
     )
 
     private var ocr: PaddleOCR? = null
+    private var piperTTS: PiperTTS? = null
 
     private var cameraDevice: CameraDevice? = null
     private var cameraSession: CameraCaptureSession? = null
@@ -110,7 +111,7 @@ class MainActivity : Activity() {
                     return@launch
                 }
 
-                statusText.text = "Loading OCR models..."
+                statusText.text = "Loading OCR & TTS models..."
 
                 val engine = PaddleOCR.create(
                     context = this@MainActivity,
@@ -141,6 +142,7 @@ class MainActivity : Activity() {
                 )
 
                 ocr = engine
+                piperTTS = PiperTTS(this@MainActivity)
 
                 statusText.text = "OCR ready"
 
@@ -440,6 +442,8 @@ class MainActivity : Activity() {
     private fun captureText() {
         if (scanInProgress) return
 
+        piperTTS?.stop()
+
         val camera = cameraDevice ?: run {
             statusText.text = "Camera not ready"
             return
@@ -549,6 +553,22 @@ class MainActivity : Activity() {
 
                             statusText.text =
                                 "Detected ${result.lineCount} line(s) • ${result.totalTimeMs} ms"
+
+                            val spokenText = result.results
+                                .map { it.text.trim() }
+                                .filter { it.isNotEmpty() }
+                                .joinToString(" ")
+
+                            if (spokenText.isNotBlank()) {
+                                statusText.text = "Speaking..."
+                                piperTTS?.speak(spokenText) {
+                                    runOnUiThread {
+                                        if (!scanInProgress) {
+                                            statusText.text = "Done"
+                                        }
+                                    }
+                                }
+                            }
                         }
 
                     } catch (t: Throwable) {
@@ -813,6 +833,9 @@ class MainActivity : Activity() {
         cameraThread?.quitSafely()
         cameraThread = null
         cameraHandler = null
+
+        piperTTS?.close()
+        piperTTS = null
 
         appScope.launch {
             try {
