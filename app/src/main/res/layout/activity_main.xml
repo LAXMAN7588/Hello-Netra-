@@ -1,104 +1,294 @@
 <?xml version="1.0" encoding="utf-8"?>
 <FrameLayout
     xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
     android:id="@+id/main"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="#000000">
+    android:background="#121212">
 
-    <!-- CameraX Live Preview -->
-    <androidx.camera.view.PreviewView
-        android:id="@+id/previewView"
+    <!-- Raspberry Pi Frame Display -->
+    <ImageView
+        android:id="@+id/frameView"
         android:layout_width="match_parent"
-        android:layout_height="match_parent" />
+        android:layout_height="match_parent"
+        android:scaleType="fitCenter"
+        android:contentDescription="Raspberry Pi Camera Stream" />
 
-    <!-- Bounding Box & Label Overlay -->
+    <!-- Detection Bounding Box & Label Overlay -->
     <com.example.objectdetection.DetectionOverlay
         android:id="@+id/detectionOverlay"
         android:layout_width="match_parent"
         android:layout_height="match_parent" />
 
-    <!-- Performance & Status HUD Panel -->
-    <LinearLayout
+    <!-- Scrollable Main Container for HUD, Safety ToF Matrix & Emergency Contacts -->
+    <ScrollView
         android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_gravity="top"
-        android:orientation="vertical"
-        android:padding="12dp"
-        android:layout_margin="12dp"
-        android:background="#B3000000">
-
-        <TextView
-            android:id="@+id/statusText"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="Status: Initializing..."
-            android:textColor="#4CAF50"
-            android:textSize="15sp"
-            android:textStyle="bold" />
-
-        <TextView
-            android:id="@+id/countText"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="2dp"
-            android:text="Total Objects: 0"
-            android:textColor="#FFFFFF"
-            android:textSize="14sp"
-            android:textStyle="bold" />
-
-        <TextView
-            android:id="@+id/breakdownText"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="2dp"
-            android:text="Counts: None"
-            android:textColor="#FFEB3B"
-            android:textSize="13sp" />
+        android:layout_height="match_parent"
+        android:fillViewport="false">
 
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="4dp"
-            android:orientation="horizontal">
+            android:orientation="vertical"
+            android:padding="8dp">
 
-            <TextView
-                android:id="@+id/fpsText"
-                android:layout_width="0dp"
+            <!-- Rich Performance & Network HUD Panel -->
+            <LinearLayout
+                android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:text="FPS: --"
-                android:textColor="#00E676"
-                android:textSize="13sp" />
+                android:orientation="vertical"
+                android:padding="12dp"
+                android:background="#E6000000">
 
-            <TextView
-                android:id="@+id/inferenceText"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:text="Inference: -- ms"
-                android:textColor="#00E5FF"
-                android:textSize="13sp" />
+                <!-- Connection State & Mode -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal">
 
-            <TextView
-                android:id="@+id/ramText"
-                android:layout_width="0dp"
+                    <TextView
+                        android:id="@+id/connectionStatusText"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="Connection: WAITING FOR PI"
+                        android:textColor="#FFD600"
+                        android:textSize="14sp"
+                        android:textStyle="bold" />
+
+                    <TextView
+                        android:id="@+id/wifiModeText"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="Wi-Fi: LOCAL HOTSPOT"
+                        android:textColor="#00E5FF"
+                        android:textSize="12sp"
+                        android:textStyle="bold" />
+                </LinearLayout>
+
+                <!-- Active System Mode -->
+                <TextView
+                    android:id="@+id/currentModeText"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="2dp"
+                    android:text="Current Mode: IDLE (Standby)"
+                    android:textColor="#76FF03"
+                    android:textSize="13sp"
+                    android:textStyle="bold" />
+
+                <!-- Server Address Info -->
+                <TextView
+                    android:id="@+id/serverAddressText"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="2dp"
+                    android:text="Frame Server: 192.168.43.1:5000"
+                    android:textColor="#B0BEC5"
+                    android:textSize="12sp" />
+
+                <!-- Frame Packet Counters -->
+                <TextView
+                    android:id="@+id/frameStatsText"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="3dp"
+                    android:text="Frames: Recv: 0 | Proc: 0 | Drop: 0"
+                    android:textColor="#FFFFFF"
+                    android:textSize="13sp" />
+
+                <!-- Performance Metrics: FPS, Inference, RAM -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="3dp"
+                    android:orientation="horizontal">
+
+                    <TextView
+                        android:id="@+id/fpsText"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="FPS: 0.0"
+                        android:textColor="#00E676"
+                        android:textSize="13sp" />
+
+                    <TextView
+                        android:id="@+id/inferenceText"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="Inference: -- ms"
+                        android:textColor="#FFD600"
+                        android:textSize="13sp" />
+
+                    <TextView
+                        android:id="@+id/ramText"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="RAM: -- MB"
+                        android:textColor="#FF9100"
+                        android:textSize="13sp" />
+                </LinearLayout>
+
+                <!-- Object Detection Info (>=60% confidence) -->
+                <TextView
+                    android:id="@+id/countText"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:text="Objects (>=60%): 0"
+                    android:textColor="#FFFFFF"
+                    android:textSize="14sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/breakdownText"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="2dp"
+                    android:text="Counts: None"
+                    android:textColor="#FFEB3B"
+                    android:textSize="13sp" />
+
+                <!-- OCR Status & Decoded Text -->
+                <TextView
+                    android:id="@+id/ocrStatusText"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:text="OCR: Ready"
+                    android:textColor="#40C4FF"
+                    android:textSize="13sp"
+                    android:textStyle="bold" />
+
+                <!-- SOS Status & Location -->
+                <TextView
+                    android:id="@+id/sosStatusText"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:text="SOS: Ready (0 Contacts)"
+                    android:textColor="#FF5252"
+                    android:textSize="13sp"
+                    android:textStyle="bold" />
+
+                <!-- Piper TTS Status -->
+                <TextView
+                    android:id="@+id/ttsStatusText"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:text="TTS: Ready"
+                    android:textColor="#CE93D8"
+                    android:textSize="12sp" />
+
+            </LinearLayout>
+
+            <!-- VL53L5CX Safety ToF 4x4 Diagnostic Card -->
+            <LinearLayout
+                android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:text="RAM: -- MB"
-                android:textColor="#FF9100"
-                android:textSize="13sp" />
+                android:layout_marginTop="8dp"
+                android:orientation="vertical"
+                android:padding="12dp"
+                android:background="#E61A237E">
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical">
+
+                    <TextView
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="VL53L5CX Safety Sensor (4x4 ToF)"
+                        android:textColor="#FFFFFF"
+                        android:textSize="14sp"
+                        android:textStyle="bold" />
+
+                    <TextView
+                        android:id="@+id/tofStatusText"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="Status: WAITING"
+                        android:textColor="#FFD600"
+                        android:textSize="12sp"
+                        android:textStyle="bold" />
+                </LinearLayout>
+
+                <TextView
+                    android:id="@+id/tofTelemetryText"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="2dp"
+                    android:text="Rate: 0.0 Hz | Min: -- mm | Valid: 0/16"
+                    android:textColor="#B0BEC5"
+                    android:textSize="12sp" />
+
+                <!-- 4x4 Distance Grid Layout -->
+                <GridLayout
+                    android:id="@+id/tofGrid"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:columnCount="4"
+                    android:rowCount="4"
+                    android:alignmentMode="alignMargins"
+                    android:useDefaultMargins="true" />
+
+            </LinearLayout>
+
+            <!-- Emergency Contacts Section -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:orientation="vertical"
+                android:padding="12dp"
+                android:background="#E61E1E1E">
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical">
+
+                    <TextView
+                        android:id="@+id/contactsHeader"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="Emergency Contacts (0)"
+                        android:textColor="#FFFFFF"
+                        android:textSize="15sp"
+                        android:textStyle="bold" />
+
+                    <Button
+                        android:id="@+id/btnAddContact"
+                        android:layout_width="wrap_content"
+                        android:layout_height="36dp"
+                        android:text="+ Add Contact"
+                        android:textSize="12sp"
+                        android:backgroundTint="#2979FF"
+                        android:textColor="#FFFFFF" />
+                </LinearLayout>
+
+                <!-- Contacts List Container -->
+                <LinearLayout
+                    android:id="@+id/contactsContainer"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:orientation="vertical" />
+
+            </LinearLayout>
+
         </LinearLayout>
-
-        <TextView
-            android:id="@+id/ttsStatusText"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="4dp"
-            android:text="TTS: Ready"
-            android:textColor="#B0BEC5"
-            android:textSize="12sp" />
-
-    </LinearLayout>
+    </ScrollView>
 
 </FrameLayout>

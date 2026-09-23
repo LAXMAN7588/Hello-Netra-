@@ -44,14 +44,14 @@ class DetectionOverlay @JvmOverloads constructor(
     private val textPaint = Paint().apply {
         style = Paint.Style.FILL
         color = Color.WHITE
-        textSize = 38f
+        textSize = 36f
         isFakeBoldText = true
         isAntiAlias = true
     }
 
     private var detections: List<Detection> = emptyList()
-    private var sourceWidth = 640
-    private var sourceHeight = 640
+    private var sourceWidth = 0
+    private var sourceHeight = 0
 
     fun setDetections(
         newDetections: List<Detection>,
@@ -74,18 +74,23 @@ class DetectionOverlay @JvmOverloads constructor(
 
         if (sourceWidth <= 0 || sourceHeight <= 0 || detections.isEmpty()) return
 
-        val scaleX = width.toFloat() / sourceWidth
-        val scaleY = height.toFloat() / sourceHeight
+        // Maintain aspect fit alignment matching the ImageView's fitCenter scaling
+        val viewW = width.toFloat()
+        val viewH = height.toFloat()
+
+        val scale = minOf(viewW / sourceWidth, viewH / sourceHeight)
+        val offsetX = (viewW - sourceWidth * scale) / 2f
+        val offsetY = (viewH - sourceHeight * scale) / 2f
 
         for (detection in detections) {
             val color = classColors[detection.classId % classColors.size]
             boxPaint.color = color
             textBgPaint.color = color
 
-            val left = detection.left * scaleX
-            val top = detection.top * scaleY
-            val right = detection.right * scaleX
-            val bottom = detection.bottom * scaleY
+            val left = detection.left * scale + offsetX
+            val top = detection.top * scale + offsetY
+            val right = detection.right * scale + offsetX
+            val bottom = detection.bottom * scale + offsetY
 
             // Draw bounding box
             val boxRect = RectF(left, top, right, bottom)
@@ -96,11 +101,10 @@ class DetectionOverlay @JvmOverloads constructor(
             val labelText = "${detection.label} $confidencePct%"
 
             val textWidth = textPaint.measureText(labelText)
-            val textHeight = 44f
-            val padding = 10f
+            val textHeight = 42f
+            val padding = 8f
 
-            // Position label above the box if room allows, otherwise inside
-            val labelTop = if (top - textHeight - padding >= 0) {
+            val labelTop = if (top - textHeight - padding >= offsetY) {
                 top - textHeight - padding
             } else {
                 top
@@ -110,7 +114,6 @@ class DetectionOverlay @JvmOverloads constructor(
             val bgRect = RectF(left, labelTop, left + textWidth + (padding * 2), labelBottom)
             canvas.drawRoundRect(bgRect, 6f, 6f, textBgPaint)
 
-            // Draw text
             canvas.drawText(
                 labelText,
                 left + padding,

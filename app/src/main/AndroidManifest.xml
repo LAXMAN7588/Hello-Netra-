@@ -1,8 +1,23 @@
 <?xml version="1.0" encoding="utf-8"?>
-
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!-- Permissions for local TCP frame server over mobile hotspot -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+
+    <!-- Camera permission (for local fallback / frames) -->
     <uses-permission android:name="android.permission.CAMERA" />
+
+    <!-- Emergency SOS SMS & Location permissions -->
+    <uses-permission android:name="android.permission.SEND_SMS" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+
+    <!-- Foreground service and notifications for background readiness -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <application
         android:allowBackup="true"
@@ -20,6 +35,12 @@
             </intent-filter>
 
         </activity>
+
+        <!-- Background Assistant Service -->
+        <service
+            android:name=".AppService"
+            android:foregroundServiceType="connectedDevice"
+            android:exported="false" />
 
     </application>
 

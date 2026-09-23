@@ -6,9 +6,7 @@ import ai.onnxruntime.OrtSession
 import android.content.Context
 import android.media.AudioAttributes
 import android.media.AudioFormat
-import android.media.AudioManager
 import android.media.AudioTrack
-import android.os.Build
 import android.os.SystemClock
 import android.util.Log
 import java.io.File
@@ -32,12 +30,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  * - Model Output:
  *     1. "output": float32 [1, 1, 1, num_samples] (Raw 22.05 kHz audio waveform)
  *
- * Phonemization pipeline note:
- * Official Piper TTS uses eSpeak-ng (a C native library) to convert text to IPA phoneme strings,
- * which are then mapped to integer IDs via the model's phoneme_id_map.
- * For Android without bundling a heavy native C++ eSpeak-ng toolchain, the exact phoneme ID
- * sequences for all required numbers, class names, plurals, and connector tokens were pre-calculated
- * using the official piper-tts / piper_phonemize library and included here for exact fidelity.
+ * Supports both pre-compiled lexical vocabulary and arbitrary character/word phonetic synthesis.
  */
 class PiperTTS(private val context: Context) {
 
@@ -53,8 +46,55 @@ class PiperTTS(private val context: Context) {
         private const val COMMA: Long = 8L
         private const val PERIOD: Long = 10L
 
+        // Character to Direct Piper Phoneme ID map (from en_US-ryan-medium.onnx.json)
+        private val CHAR_PHONEME_MAP = mapOf(
+            ' ' to 3L,
+            '!' to 4L,
+            '\'' to 5L,
+            ',' to 8L,
+            '-' to 9L,
+            '.' to 10L,
+            ':' to 11L,
+            ';' to 12L,
+            '?' to 13L,
+            'a' to 14L,
+            'b' to 15L,
+            'c' to 16L,
+            'd' to 17L,
+            'e' to 18L,
+            'f' to 19L,
+            'h' to 20L,
+            'i' to 21L,
+            'j' to 22L,
+            'k' to 23L,
+            'l' to 24L,
+            'm' to 25L,
+            'n' to 26L,
+            'o' to 27L,
+            'p' to 28L,
+            'q' to 29L,
+            'r' to 30L,
+            's' to 31L,
+            't' to 32L,
+            'u' to 33L,
+            'v' to 34L,
+            'w' to 35L,
+            'x' to 36L,
+            'y' to 37L,
+            'z' to 38L,
+            '0' to 130L,
+            '1' to 131L,
+            '2' to 132L,
+            '3' to 133L,
+            '4' to 134L,
+            '5' to 135L,
+            '6' to 136L,
+            '7' to 137L,
+            '8' to 138L,
+            '9' to 139L
+        )
+
         // Exact phoneme token sequences generated from official Piper phonemizer (en-us voice)
-        // Format: Sequence of phoneme token IDs without boundary BOS/EOS (handled dynamically during phrase assembly)
         private val WORD_PHONEME_MAP = mapOf(
             // Numbers
             "zero" to longArrayOf(38, 120, 21, 59, 88, 27, 100),
@@ -123,7 +163,18 @@ class PiperTTS(private val context: Context) {
             "and" to longArrayOf(39, 26, 17),
             "detected" to longArrayOf(17, 74, 32, 120, 61, 23, 32, 128, 17),
             "no" to longArrayOf(26, 120, 27, 100),
-            "objects" to longArrayOf(120, 51, 122, 15, 17, 108, 61, 23, 32, 31)
+            "objects" to longArrayOf(120, 51, 122, 15, 17, 108, 61, 23, 32, 31),
+            "text" to longArrayOf(32, 120, 61, 23, 31, 32),
+            "reading" to longArrayOf(88, 120, 21, 122, 17, 74, 44),
+            "ocr" to longArrayOf(120, 27, 100, 31, 21, 122, 120, 51, 122, 88),
+            "mode" to longArrayOf(25, 120, 27, 100, 17),
+            "sos" to longArrayOf(120, 61, 31, 120, 27, 100, 120, 61, 31),
+            "sent" to longArrayOf(31, 120, 61, 26, 32),
+            "saved" to longArrayOf(31, 120, 18, 74, 34, 17),
+            "contacts" to longArrayOf(23, 120, 51, 122, 26, 32, 39, 23, 32, 31),
+            "failed" to longArrayOf(19, 120, 18, 74, 24, 17),
+            "message" to longArrayOf(25, 120, 61, 31, 74, 108),
+            "ready" to longArrayOf(88, 120, 61, 17, 21)
         )
     }
 
@@ -180,7 +231,7 @@ class PiperTTS(private val context: Context) {
     fun getLastInferenceTimeMs(): Long = lastInferenceTimeMs
 
     /**
-     * Converts an English phrase into Piper phoneme token IDs.
+     * Converts text (words, phrases, arbitrary OCR text) into Piper phoneme token IDs.
      */
     fun textToPhonemeIds(text: String): LongArray {
         val tokens = mutableListOf<Long>()
@@ -193,6 +244,8 @@ class PiperTTS(private val context: Context) {
         var addedWord = false
         for (rawItem in wordsAndPunct) {
             var item = rawItem.trim()
+            if (item.isEmpty()) continue
+
             var hasComma = false
             var hasPeriod = false
 
@@ -204,26 +257,41 @@ class PiperTTS(private val context: Context) {
                 item = item.substring(0, item.length - 1)
             }
 
-            val phonemes = WORD_PHONEME_MAP[item]
-            if (phonemes != null) {
+            val knownPhonemes = WORD_PHONEME_MAP[item]
+            if (knownPhonemes != null) {
                 if (addedWord) {
                     tokens.add(SPACE)
                     tokens.add(PAD)
                 }
 
-                for (id in phonemes) {
+                for (id in knownPhonemes) {
                     tokens.add(id)
                     tokens.add(PAD)
                 }
                 addedWord = true
-
-                if (hasComma) {
-                    tokens.add(COMMA)
-                    tokens.add(PAD)
-                } else if (hasPeriod) {
-                    tokens.add(PERIOD)
+            } else {
+                // Character-by-character phonetic synthesis for arbitrary OCR text
+                if (addedWord) {
+                    tokens.add(SPACE)
                     tokens.add(PAD)
                 }
+
+                for (char in item) {
+                    val charToken = CHAR_PHONEME_MAP[char]
+                    if (charToken != null) {
+                        tokens.add(charToken)
+                        tokens.add(PAD)
+                    }
+                }
+                addedWord = true
+            }
+
+            if (hasComma) {
+                tokens.add(COMMA)
+                tokens.add(PAD)
+            } else if (hasPeriod) {
+                tokens.add(PERIOD)
+                tokens.add(PAD)
             }
         }
 
@@ -232,9 +300,14 @@ class PiperTTS(private val context: Context) {
     }
 
     /**
-     * Synthesizes audio and plays it asynchronously without blocking the camera or UI threads.
+     * Synthesizes audio and plays it asynchronously without blocking camera or UI threads.
      */
     fun speak(text: String, onComplete: (() -> Unit)? = null) {
+        if (text.isBlank()) {
+            onComplete?.invoke()
+            return
+        }
+
         executor.execute {
             stopCurrentAudio()
             isSpeaking.set(true)
@@ -242,7 +315,6 @@ class PiperTTS(private val context: Context) {
             try {
                 val phonemeIds = textToPhonemeIds(text)
                 if (phonemeIds.size <= 3) {
-                    // Empty or unrecognized phrase
                     isSpeaking.set(false)
                     onComplete?.invoke()
                     return@execute
@@ -261,9 +333,6 @@ class PiperTTS(private val context: Context) {
         }
     }
 
-    /**
-     * Runs ONNX inference for Piper TTS model.
-     */
     private fun synthesize(phonemeIds: LongArray): FloatArray? {
         val session = ortSession ?: return null
 
@@ -275,7 +344,6 @@ class PiperTTS(private val context: Context) {
         var result: OrtSession.Result? = null
 
         try {
-            // 1. input: int64 [1, sequence_length]
             val inputBuffer = LongBuffer.wrap(phonemeIds)
             inputTensor = OnnxTensor.createTensor(
                 ortEnv,
@@ -283,7 +351,6 @@ class PiperTTS(private val context: Context) {
                 longArrayOf(1, phonemeIds.size.toLong())
             )
 
-            // 2. input_lengths: int64 [1]
             val lengthsBuffer = LongBuffer.wrap(longArrayOf(phonemeIds.size.toLong()))
             lengthsTensor = OnnxTensor.createTensor(
                 ortEnv,
@@ -291,7 +358,6 @@ class PiperTTS(private val context: Context) {
                 longArrayOf(1)
             )
 
-            // 3. scales: float32 [3] (noise_scale=0.667, length_scale=1.0, noise_w=0.8)
             val scalesBuffer = FloatBuffer.wrap(floatArrayOf(0.667f, 1.0f, 0.8f))
             scalesTensor = OnnxTensor.createTensor(
                 ortEnv,
@@ -325,9 +391,6 @@ class PiperTTS(private val context: Context) {
         }
     }
 
-    /**
-     * Plays float PCM audio samples via Android AudioTrack.
-     */
     private fun playAudio(samples: FloatArray) {
         val shortBuffer = ShortArray(samples.size)
         for (i in samples.indices) {
@@ -365,7 +428,6 @@ class PiperTTS(private val context: Context) {
         audioTrack.write(shortBuffer, 0, shortBuffer.size)
         audioTrack.play()
 
-        // Wait for playback completion
         val durationMs = (shortBuffer.size.toDouble() / SAMPLE_RATE * 1000).toLong()
         try {
             Thread.sleep(durationMs + 50)

@@ -12,7 +12,7 @@ import java.nio.FloatBuffer
 
 /**
  * Result data class containing the preprocessed tensor data and transformation parameters
- * needed to map bounding boxes back to the original camera frame.
+ * needed to map bounding boxes back to the original frame.
  */
 data class PreprocessResult(
     val floatBuffer: FloatBuffer,
@@ -34,7 +34,7 @@ class ImagePreprocessor(
         style = Paint.Style.FILL
     }
 
-    // Reusable buffers to minimize memory allocations per frame
+    // Reusable buffers to minimize allocations per frame
     private var letterboxBitmap: Bitmap = Bitmap.createBitmap(targetWidth, targetHeight, Bitmap.Config.ARGB_8888)
     private var letterboxCanvas: Canvas = Canvas(letterboxBitmap)
     private var pixels = IntArray(targetWidth * targetHeight)
@@ -44,27 +44,13 @@ class ImagePreprocessor(
         .asFloatBuffer()
 
     /**
-     * Converts a CameraX ImageProxy to a rotated Bitmap and prepares a letterboxed 1x3x640x640 CHW FloatBuffer.
+     * Preprocesses a decoded Bitmap (e.g. from Raspberry Pi JPEG stream) with YOLO letterbox resize.
      */
-    fun preprocess(imageProxy: ImageProxy): PreprocessResult {
-        // 1. Convert ImageProxy to Bitmap
-        val bitmap = imageProxy.toBitmap()
-        val rotationDegrees = imageProxy.imageInfo.rotationDegrees
+    fun preprocess(bitmap: Bitmap): PreprocessResult {
+        val srcWidth = bitmap.width
+        val srcHeight = bitmap.height
 
-        // 2. Rotate Bitmap if needed to match portrait/device display
-        val rotatedBitmap = if (rotationDegrees != 0) {
-            val matrix = Matrix().apply { postRotate(rotationDegrees.toFloat()) }
-            val rotated = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
-            bitmap.recycle()
-            rotated
-        } else {
-            bitmap
-        }
-
-        val srcWidth = rotatedBitmap.width
-        val srcHeight = rotatedBitmap.height
-
-        // 3. Calculate YOLO letterbox scale and padding
+        // 1. Calculate YOLO letterbox scale and padding
         val scale = minOf(
             targetWidth.toFloat() / srcWidth,
             targetHeight.toFloat() / srcHeight
@@ -74,16 +60,15 @@ class ImagePreprocessor(
         val padX = (targetWidth - scaledWidth) / 2.0f
         val padY = (targetHeight - scaledHeight) / 2.0f
 
-        // 4. Draw padded letterbox image
+        // 2. Draw padded letterbox image
         letterboxCanvas.drawRect(0f, 0f, targetWidth.toFloat(), targetHeight.toFloat(), backgroundPaint)
         val drawMatrix = Matrix().apply {
             postScale(scale, scale)
             postTranslate(padX, padY)
         }
-        letterboxCanvas.drawBitmap(rotatedBitmap, drawMatrix, letterboxPaint)
-        rotatedBitmap.recycle()
+        letterboxCanvas.drawBitmap(bitmap, drawMatrix, letterboxPaint)
 
-        // 5. Extract RGB pixels and normalize to [0.0, 1.0] in CHW layout (1, 3, 640, 640)
+        // 3. Extract RGB pixels and normalize to [0.0, 1.0] in CHW layout (1, 3, 640, 640)
         letterboxBitmap.getPixels(pixels, 0, targetWidth, 0, 0, targetWidth, targetHeight)
         floatBuffer.clear()
 
@@ -92,7 +77,6 @@ class ImagePreprocessor(
         val gOffset = numPixels
         val bOffset = numPixels * 2
 
-        // Write directly to FloatBuffer in CHW format
         for (i in 0 until numPixels) {
             val pixel = pixels[i]
             val r = ((pixel shr 16) and 0xFF) / 255.0f
@@ -114,6 +98,27 @@ class ImagePreprocessor(
             sourceWidth = srcWidth,
             sourceHeight = srcHeight
         )
+    }
+
+    /**
+     * Converts a CameraX ImageProxy to a rotated Bitmap and prepares a letterboxed 1x3x640x640 CHW FloatBuffer.
+     */
+    fun preprocess(imageProxy: ImageProxy): PreprocessResult {
+        val bitmap = imageProxy.toBitmap()
+        val rotationDegrees = imageProxy.imageInfo.rotationDegrees
+
+        val rotatedBitmap = if (rotationDegrees != 0) {
+            val matrix = Matrix().apply { postRotate(rotationDegrees.toFloat()) }
+            val rotated = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+            bitmap.recycle()
+            rotated
+        } else {
+            bitmap
+        }
+
+        val result = preprocess(rotatedBitmap)
+        rotatedBitmap.recycle()
+        return result
     }
 
     fun release() {

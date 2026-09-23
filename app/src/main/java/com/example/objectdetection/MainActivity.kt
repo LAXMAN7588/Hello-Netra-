@@ -1,269 +1,512 @@
 package com.example.objectdetection
 
 import android.Manifest
+import android.content.ComponentName
+import android.content.Context
+import android.content.Intent
+import android.content.ServiceConnection
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.Color
+import android.graphics.drawable.GradientDrawable
+import android.os.Build
 import android.os.Bundle
-import android.os.SystemClock
+import android.os.IBinder
 import android.util.Log
+import android.view.Gravity
+import android.view.LayoutInflater
+import android.widget.Button
+import android.widget.EditText
+import android.widget.GridLayout
+import android.widget.ImageView
+import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
-import androidx.camera.core.CameraSelector
-import androidx.camera.core.ImageAnalysis
-import androidx.camera.core.ImageProxy
-import androidx.camera.core.Preview
-import androidx.camera.lifecycle.ProcessCameraProvider
-import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
-import java.util.concurrent.ExecutorService
-import java.util.concurrent.Executors
+import com.example.objectdetection.safety.ObstacleAnalyzer
+import com.example.objectdetection.safety.TofFrame
+import com.example.objectdetection.safety.TofSensorManager
 
-class MainActivity : AppCompatActivity() {
+class MainActivity : AppCompatActivity(), AppService.ServiceUiListener {
 
     companion object {
         private const val TAG = "MainActivity"
     }
 
-    // UI Components
-    private lateinit var previewView: PreviewView
+    // UI Views
+    private lateinit var frameView: ImageView
     private lateinit var detectionOverlay: DetectionOverlay
-    private lateinit var statusText: TextView
-    private lateinit var countText: TextView
-    private lateinit var breakdownText: TextView
+    private lateinit var connectionStatusText: TextView
+    private lateinit var wifiModeText: TextView
+    private lateinit var currentModeText: TextView
+    private lateinit var serverAddressText: TextView
+    private lateinit var frameStatsText: TextView
     private lateinit var fpsText: TextView
     private lateinit var inferenceText: TextView
     private lateinit var ramText: TextView
+    private lateinit var countText: TextView
+    private lateinit var breakdownText: TextView
+    private lateinit var ocrStatusText: TextView
+    private lateinit var sosStatusText: TextView
     private lateinit var ttsStatusText: TextView
 
-    // Pipelines and Models
-    private var objectDetector: ObjectDetector? = null
-    private var imagePreprocessor: ImagePreprocessor? = null
-    private var piperTTS: PiperTTS? = null
-    private var announcementManager: AnnouncementManager? = null
+    // ToF Safety Diagnostic Views
+    private lateinit var tofStatusText: TextView
+    private lateinit var tofTelemetryText: TextView
+    private lateinit var tofGrid: GridLayout
+    private lateinit var tofCells: Array<TextView>
 
-    // Background Executors
-    private val cameraExecutor: ExecutorService = Executors.newSingleThreadExecutor()
+    // Emergency Contacts Views
+    private lateinit var contactsHeader: TextView
+    private lateinit var btnAddContact: Button
+    private lateinit var contactsContainer: LinearLayout
 
-    // Performance Metrics Tracking
-    private var frameCount = 0
-    private var lastFpsTimestamp = 0L
-    private var currentFps = 0.0
+    // Background Service Binding
+    private var appService: AppService? = null
+    private var isBound = false
 
-    // Permission launcher
-    private val cameraPermissionLauncher = registerForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { isGranted ->
-        if (isGranted) {
-            startCamera()
-        } else {
-            Toast.makeText(this, "Camera permission is required for object detection", Toast.LENGTH_LONG).show()
-            statusText.text = "Status: Camera permission denied"
+    private val serviceConnection = object : ServiceConnection {
+        override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
+            val binder = service as? AppService.LocalBinder
+            appService = binder?.service
+            isBound = true
+            appService?.addUiListener(this@MainActivity)
+
+            appService?.contactRepository?.addListener(contactsChangeListener)
+            refreshContactsUi()
+            refreshServiceStatus()
+            Log.i(TAG, "Connected and bound to AppService.")
         }
+
+        override fun onServiceDisconnected(name: ComponentName?) {
+            appService?.removeUiListener(this@MainActivity)
+            appService?.contactRepository?.removeListener(contactsChangeListener)
+            appService = null
+            isBound = false
+            Log.i(TAG, "Disconnected from AppService.")
+        }
+    }
+
+    private val contactsChangeListener = object : EmergencyContactRepository.ContactChangeListener {
+        override fun onContactsUpdated(contacts: List<EmergencyContact>) {
+            runOnUiThread {
+                refreshContactsUi()
+            }
+        }
+    }
+
+    // Permissions launcher
+    private val permissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { permissions ->
+        val smsGranted = permissions[Manifest.permission.SEND_SMS] ?: false
+        val fineLoc = permissions[Manifest.permission.ACCESS_FINE_LOCATION] ?: false
+        Log.i(TAG, "Permission results: SMS=$smsGranted, Location=$fineLoc")
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        tofCells = Array(TofFrame.NUM_ZONES) {
+            TextView(this)
+        }
+
         setContentView(R.layout.activity_main)
 
-        // Initialize UI Views
-        previewView = findViewById(R.id.previewView)
+        initViews()
+        setupTofGrid()
+        requestAppPermissions()
+        startAndBindAppService()
+    }
+
+    private fun initViews() {
+        frameView = findViewById(R.id.frameView)
         detectionOverlay = findViewById(R.id.detectionOverlay)
-        statusText = findViewById(R.id.statusText)
-        countText = findViewById(R.id.countText)
-        breakdownText = findViewById(R.id.breakdownText)
+        connectionStatusText = findViewById(R.id.connectionStatusText)
+        wifiModeText = findViewById(R.id.wifiModeText)
+        currentModeText = findViewById(R.id.currentModeText)
+        serverAddressText = findViewById(R.id.serverAddressText)
+        frameStatsText = findViewById(R.id.frameStatsText)
         fpsText = findViewById(R.id.fpsText)
         inferenceText = findViewById(R.id.inferenceText)
         ramText = findViewById(R.id.ramText)
+        countText = findViewById(R.id.countText)
+        breakdownText = findViewById(R.id.breakdownText)
+        ocrStatusText = findViewById(R.id.ocrStatusText)
+        sosStatusText = findViewById(R.id.sosStatusText)
         ttsStatusText = findViewById(R.id.ttsStatusText)
 
-        initializeModels()
+        tofStatusText = findViewById(R.id.tofStatusText)
+        tofTelemetryText = findViewById(R.id.tofTelemetryText)
+        tofGrid = findViewById(R.id.tofGrid)
 
-        // Check camera permission
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
-            startCamera()
-        } else {
-            cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+        contactsHeader = findViewById(R.id.contactsHeader)
+        btnAddContact = findViewById(R.id.btnAddContact)
+        contactsContainer = findViewById(R.id.contactsContainer)
+
+        btnAddContact.setOnClickListener {
+            showAddContactDialog()
         }
     }
 
-    /**
-     * Initializes ONNX models ONCE during app startup.
-     */
-    private fun initializeModels() {
-        try {
-            statusText.text = "Status: Loading ONNX models..."
+    private fun setupTofGrid() {
+        tofGrid.removeAllViews()
 
-            // 1. Initialize YOLO Image Preprocessor
-            imagePreprocessor = ImagePreprocessor(targetWidth = 640, targetHeight = 640)
+        for (i in 0 until TofFrame.NUM_ZONES) {
+            val cell = TextView(this).apply {
+                text = "--"
+                textSize = 11f
+                setTextColor(Color.WHITE)
+                gravity = Gravity.CENTER
+                setPadding(4, 8, 4, 8)
 
-            // 2. Initialize Object Detection Model
-            objectDetector = ObjectDetector(
-                context = this,
-                confidenceThreshold = 0.40f,
-                iouThreshold = 0.45f
-            )
-
-            // 3. Initialize Piper TTS Model
-            val tts = PiperTTS(this)
-            piperTTS = tts
-
-            // 4. Initialize Announcement Manager
-            announcementManager = AnnouncementManager(tts).apply {
-                onAnnouncementStateChanged = { phrase ->
-                    runOnUiThread {
-                        val ttsMs = tts.getLastInferenceTimeMs()
-                        ttsStatusText.text = "TTS (${ttsMs}ms): \"$phrase\""
-                    }
+                val gd = GradientDrawable().apply {
+                    setColor(Color.parseColor("#37474F"))
+                    cornerRadius = 6f
+                    setStroke(1, Color.parseColor("#546E7A"))
                 }
-            }
+                background = gd
 
-            statusText.text = "Status: Models Ready"
-            statusText.setTextColor(ContextCompat.getColor(this, android.R.color.holo_green_light))
-            Log.i(TAG, "All models and components successfully initialized.")
-        } catch (e: Exception) {
-            Log.e(TAG, "Initialization failed", e)
-            statusText.text = "Status: Init Error - ${e.message}"
-            statusText.setTextColor(ContextCompat.getColor(this, android.R.color.holo_red_light))
-            Toast.makeText(this, "Model init error: ${e.message}", Toast.LENGTH_LONG).show()
+                val params = GridLayout.LayoutParams().apply {
+                    width = 0
+                    height = GridLayout.LayoutParams.WRAP_CONTENT
+                    columnSpec = GridLayout.spec(i % 4, 1f)
+                    rowSpec = GridLayout.spec(i / 4)
+                    setMargins(3, 3, 3, 3)
+                }
+                layoutParams = params
+            }
+            tofCells[i] = cell
+            tofGrid.addView(cell)
         }
     }
 
-    /**
-     * Configures CameraX with Preview and ImageAnalysis use cases using STRATEGY_KEEP_ONLY_LATEST.
-     */
-    private fun startCamera() {
-        val cameraProviderFuture = ProcessCameraProvider.getInstance(this)
+    private fun requestAppPermissions() {
+        val permissionsToRequest = mutableListOf(
+            Manifest.permission.SEND_SMS,
+            Manifest.permission.ACCESS_FINE_LOCATION,
+            Manifest.permission.ACCESS_COARSE_LOCATION,
+            Manifest.permission.CAMERA
+        )
 
-        cameraProviderFuture.addListener({
-            val cameraProvider = cameraProviderFuture.get()
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            permissionsToRequest.add(Manifest.permission.POST_NOTIFICATIONS)
+        }
 
-            // Preview use case
-            val preview = Preview.Builder()
-                .build()
-                .also {
-                    it.surfaceProvider = previewView.surfaceProvider
-                }
+        val missing = permissionsToRequest.filter {
+            ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
+        }
 
-            // ImageAnalysis use case with non-blocking STRATEGY_KEEP_ONLY_LATEST
-            val imageAnalysis = ImageAnalysis.Builder()
-                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
-                .build()
-                .also { analysis ->
-                    analysis.setAnalyzer(cameraExecutor) { imageProxy ->
-                        processImageFrame(imageProxy)
-                    }
-                }
-
-            // Select back camera
-            val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
-
-            try {
-                cameraProvider.unbindAll()
-                cameraProvider.bindToLifecycle(
-                    this,
-                    cameraSelector,
-                    preview,
-                    imageAnalysis
-                )
-                Log.i(TAG, "Camera bound successfully to lifecycle.")
-            } catch (e: Exception) {
-                Log.e(TAG, "Use case binding failed", e)
-            }
-        }, ContextCompat.getMainExecutor(this))
+        if (missing.isNotEmpty()) {
+            permissionLauncher.launch(missing.toTypedArray())
+        }
     }
 
-    /**
-     * Frame-by-frame inference pipeline executed on background thread.
-     */
-    private fun processImageFrame(imageProxy: ImageProxy) {
-        val detector = objectDetector
-        val preprocessor = imagePreprocessor
+    private fun startAndBindAppService() {
+        val serviceIntent = Intent(this, AppService::class.java).apply {
+            action = AppService.ACTION_START_SERVICE
+        }
 
-        if (detector == null || preprocessor == null) {
-            imageProxy.close()
+        ContextCompat.startForegroundService(this, serviceIntent)
+        bindService(serviceIntent, serviceConnection, Context.BIND_AUTO_CREATE)
+    }
+
+    private fun refreshServiceStatus() {
+        val service = appService ?: return
+        val localIp = IpUtils.getLocalIpAddress()
+        serverAddressText.text = "Frame Server: $localIp:5000"
+        updateModeDisplay(service.modeController.currentMode)
+        onTofStatusChanged(service.safetyManager.sensorManager.sensorStatus)
+    }
+
+    private fun updateModeDisplay(mode: AppMode) {
+        when (mode) {
+            AppMode.IDLE -> {
+                currentModeText.text = "Current Mode: IDLE (Standby)"
+                currentModeText.setTextColor(Color.parseColor("#76FF03"))
+            }
+            AppMode.OBJECT_RECOGNITION -> {
+                currentModeText.text = "Current Mode: OBJECT RECOGNITION (120s Session)"
+                currentModeText.setTextColor(Color.parseColor("#00E5FF"))
+            }
+            AppMode.OCR -> {
+                currentModeText.text = "Current Mode: OCR Text Reading (120s Session)"
+                currentModeText.setTextColor(Color.parseColor("#FFD600"))
+            }
+            AppMode.SOS -> {
+                currentModeText.text = "Current Mode: SOS (Emergency Location Dispatch)"
+                currentModeText.setTextColor(Color.parseColor("#FF1744"))
+            }
+        }
+    }
+
+    // =========================================================================
+    // Emergency Contact Management UI
+    // =========================================================================
+
+    private fun refreshContactsUi() {
+        val repo = appService?.contactRepository ?: return
+        val contacts = repo.getContacts()
+
+        contactsHeader.text = "Emergency Contacts (${contacts.size})"
+        sosStatusText.text = "SOS: Ready (${contacts.size} Contacts)"
+
+        contactsContainer.removeAllViews()
+
+        if (contacts.isEmpty()) {
+            val emptyTv = TextView(this).apply {
+                text = "No emergency contacts configured yet.\nTap '+ Add Contact' to set up contacts for SOS."
+                setTextColor(Color.parseColor("#9E9E9E"))
+                textSize = 12f
+                setPadding(0, 8, 0, 8)
+            }
+            contactsContainer.addView(emptyTv)
             return
         }
 
-        try {
-            // 1. Measure FPS
-            calculateFps()
-
-            // 2. Preprocess frame (Letterbox 640x640 + Rotation handling)
-            val preprocessResult = preprocessor.preprocess(imageProxy)
-
-            // 3. Run Object Detection Inference & Decode
-            val detectionResult = detector.detect(preprocessResult)
-            val detections = detectionResult.detections
-            val inferenceTimeMs = detectionResult.inferenceTimeMs
-
-            // 4. Update Announcement Manager (runs debounce/cooldown logic)
-            announcementManager?.onDetections(detections)
-
-            // 5. Update UI on Main Thread
-            val ramUsageMb = calculateRamUsageMb()
-            val countsSummary = buildCountsSummary(detections)
-
-            runOnUiThread {
-                detectionOverlay.setDetections(
-                    detections,
-                    preprocessResult.sourceWidth,
-                    preprocessResult.sourceHeight
-                )
-
-                countText.text = "Total Objects: ${detections.size}"
-                breakdownText.text = "Counts: $countsSummary"
-                fpsText.text = "FPS: ${"%.1f".format(currentFps)}"
-                inferenceText.text = "Inference: ${inferenceTimeMs}ms"
-                ramText.text = "RAM: ${ramUsageMb}MB"
+        for (contact in contacts) {
+            val row = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setPadding(0, 6, 0, 6)
             }
-        } catch (e: Exception) {
-            Log.e(TAG, "Frame processing error", e)
-        } finally {
-            imageProxy.close()
+
+            val infoTv = TextView(this).apply {
+                layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                text = "${contact.name}  (${contact.phoneNumber})"
+                setTextColor(Color.WHITE)
+                textSize = 13f
+            }
+
+            val delBtn = Button(this).apply {
+                text = "Delete"
+                textSize = 11f
+                backgroundTintList = android.content.res.ColorStateList.valueOf(Color.parseColor("#D32F2F"))
+                setTextColor(Color.WHITE)
+                setOnClickListener {
+                    repo.deleteContact(contact.id)
+                    Toast.makeText(this@MainActivity, "Deleted ${contact.name}", Toast.LENGTH_SHORT).show()
+                }
+            }
+
+            row.addView(infoTv)
+            row.addView(delBtn)
+            contactsContainer.addView(row)
+        }
+    }
+
+    private fun showAddContactDialog() {
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(40, 20, 40, 10)
+        }
+
+        val nameEt = EditText(this).apply {
+            hint = "Contact Name (e.g., Mom, John)"
+            setTextColor(Color.BLACK)
+        }
+
+        val phoneEt = EditText(this).apply {
+            hint = "Phone Number (e.g., +1234567890)"
+            inputType = android.text.InputType.TYPE_CLASS_PHONE
+            setTextColor(Color.BLACK)
+        }
+
+        container.addView(nameEt)
+        container.addView(phoneEt)
+
+        AlertDialog.Builder(this)
+            .setTitle("Add Emergency Contact")
+            .setView(container)
+            .setPositiveButton("Save") { _, _ ->
+                val name = nameEt.text.toString().trim()
+                val phone = phoneEt.text.toString().trim()
+
+                if (name.isNotEmpty() && phone.isNotEmpty()) {
+                    appService?.contactRepository?.addContact(name, phone)
+                    Toast.makeText(this, "Saved $name for Emergency SOS", Toast.LENGTH_SHORT).show()
+                } else {
+                    Toast.makeText(this, "Please enter both name and phone number", Toast.LENGTH_SHORT).show()
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    // =========================================================================
+    // AppService.ServiceUiListener Callbacks
+    // =========================================================================
+
+    override fun onFrameProcessed(
+        bitmap: Bitmap,
+        detections: List<Detection>,
+        inferenceMs: Long,
+        ramMb: Long
+    ) {
+        val countsSummary = buildCountsSummary(detections)
+        val buffer = appService?.frameBuffer
+        val recv = buffer?.framesReceived ?: 0
+        val proc = buffer?.framesProcessed ?: 0
+        val drop = buffer?.framesDropped ?: 0
+        val fps = appService?.currentFps ?: 0.0
+
+        runOnUiThread {
+            frameView.setImageBitmap(bitmap)
+            detectionOverlay.setDetections(detections, bitmap.width, bitmap.height)
+
+            frameStatsText.text = "Frames: Recv: $recv | Proc: $proc | Drop: $drop"
+            fpsText.text = "FPS: ${"%.1f".format(fps)}"
+            inferenceText.text = "Inference: ${inferenceMs}ms"
+            ramText.text = "RAM: ${ramMb}MB"
+            countText.text = "Objects (>=60%): ${detections.size}"
+            breakdownText.text = "Counts: $countsSummary"
+        }
+    }
+
+    override fun onOcrProcessed(
+        bitmap: Bitmap,
+        text: String,
+        confidence: Float,
+        inferenceMs: Long,
+        ramMb: Long
+    ) {
+        val buffer = appService?.frameBuffer
+        val recv = buffer?.framesReceived ?: 0
+        val proc = buffer?.framesProcessed ?: 0
+        val drop = buffer?.framesDropped ?: 0
+        val fps = appService?.currentFps ?: 0.0
+
+        runOnUiThread {
+            frameView.setImageBitmap(bitmap)
+            detectionOverlay.clearDetections()
+
+            frameStatsText.text = "Frames: Recv: $recv | Proc: $proc | Drop: $drop"
+            fpsText.text = "FPS: ${"%.1f".format(fps)}"
+            inferenceText.text = "Inference: ${inferenceMs}ms"
+            ramText.text = "RAM: ${ramMb}MB"
+
+            val displayText = if (text.isNotBlank()) "\"$text\" (${(confidence * 100).toInt()}%)" else "No text detected"
+            ocrStatusText.text = "OCR: $displayText"
+        }
+    }
+
+    override fun onConnectionStateChanged(state: LocalFrameServer.ConnectionState) {
+        runOnUiThread {
+            when (state) {
+                is LocalFrameServer.ConnectionState.Listening -> {
+                    connectionStatusText.text = "Status: WAITING FOR PI"
+                    connectionStatusText.setTextColor(Color.parseColor("#FFD600"))
+                    serverAddressText.text = "Frame Server: ${state.localIp}:${state.port}"
+                }
+                is LocalFrameServer.ConnectionState.Connected -> {
+                    connectionStatusText.text = "Connection: CONNECTED"
+                    connectionStatusText.setTextColor(Color.parseColor("#00E676"))
+                }
+                is LocalFrameServer.ConnectionState.Disconnected -> {
+                    connectionStatusText.text = "Connection: DISCONNECTED"
+                    connectionStatusText.setTextColor(Color.parseColor("#FF5252"))
+                    detectionOverlay.clearDetections()
+                }
+                is LocalFrameServer.ConnectionState.Error -> {
+                    connectionStatusText.text = "Error: ${state.message}"
+                    connectionStatusText.setTextColor(Color.parseColor("#FF5252"))
+                }
+                is LocalFrameServer.ConnectionState.Stopped -> {
+                    connectionStatusText.text = "Connection: STOPPED"
+                    connectionStatusText.setTextColor(Color.GRAY)
+                }
+            }
+        }
+    }
+
+    override fun onModeChanged(mode: AppMode) {
+        runOnUiThread {
+            updateModeDisplay(mode)
+            if (mode != AppMode.OBJECT_RECOGNITION) {
+                detectionOverlay.clearDetections()
+            }
+        }
+    }
+
+    override fun onSosStatusChanged(status: SosManager.SosStatus) {
+        runOnUiThread {
+            sosStatusText.text = "SOS: ${status.message}"
+            sosStatusText.setTextColor(if (status.success) Color.parseColor("#00E676") else Color.parseColor("#FF1744"))
+        }
+    }
+
+    override fun onTtsStatus(message: String) {
+        runOnUiThread {
+            ttsStatusText.text = message
+        }
+    }
+
+    override fun onTofTelemetryUpdated(
+        frame: TofFrame,
+        analysis: ObstacleAnalyzer.SpatialAnalysis,
+        updateRateHz: Double
+    ) {
+        val validCount = analysis.totalValidZones
+        val minMm = if (analysis.overallMinDistanceMm > 0) "${analysis.overallMinDistanceMm}mm" else "--"
+
+        runOnUiThread {
+            tofTelemetryText.text = "Rate: ${"%.1f".format(updateRateHz)} Hz | Min: $minMm | Valid: $validCount/16"
+
+            // Update 4x4 matrix display
+            for (i in 0 until TofFrame.NUM_ZONES) {
+                val d = frame.distances[i]
+                val cell = tofCells[i]
+                if (d > 0) {
+                    cell.text = "$d"
+                    (cell.background as? GradientDrawable)?.setColor(Color.parseColor("#1B5E20")) // Dark Green for valid
+                } else {
+                    cell.text = "0"
+                    (cell.background as? GradientDrawable)?.setColor(Color.parseColor("#37474F")) // Dark Grey for invalid/no target
+                }
+            }
+        }
+    }
+
+    override fun onTofStatusChanged(status: TofSensorManager.SensorStatus) {
+        runOnUiThread {
+            when (status) {
+                TofSensorManager.SensorStatus.CONNECTED -> {
+                    tofStatusText.text = "Status: CONNECTED"
+                    tofStatusText.setTextColor(Color.parseColor("#00E676"))
+                }
+                TofSensorManager.SensorStatus.DISCONNECTED -> {
+                    tofStatusText.text = "Status: DISCONNECTED"
+                    tofStatusText.setTextColor(Color.parseColor("#FF5252"))
+                }
+                TofSensorManager.SensorStatus.WAITING -> {
+                    tofStatusText.text = "Status: WAITING"
+                    tofStatusText.setTextColor(Color.parseColor("#FFD600"))
+                }
+            }
         }
     }
 
     private fun buildCountsSummary(detections: List<Detection>): String {
         if (detections.isEmpty()) return "None"
-
         val counts = mutableMapOf<String, Int>()
         for (d in detections) {
             counts[d.label] = (counts[d.label] ?: 0) + 1
         }
-
         return counts.entries.joinToString(" | ") { "${it.key}: ${it.value}" }
-    }
-
-    private fun calculateFps() {
-        frameCount++
-        val now = SystemClock.uptimeMillis()
-        if (lastFpsTimestamp == 0L) {
-            lastFpsTimestamp = now
-            return
-        }
-
-        val elapsed = now - lastFpsTimestamp
-        if (elapsed >= 1000) {
-            currentFps = (frameCount * 1000.0) / elapsed
-            frameCount = 0
-            lastFpsTimestamp = now
-        }
-    }
-
-    private fun calculateRamUsageMb(): Long {
-        val runtime = Runtime.getRuntime()
-        val usedMemoryBytes = runtime.totalMemory() - runtime.freeMemory()
-        return usedMemoryBytes / (1024 * 1024)
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        cameraExecutor.shutdown()
-        imagePreprocessor?.release()
-        objectDetector?.close()
-        piperTTS?.close()
-        announcementManager?.reset()
+        if (isBound) {
+            appService?.removeUiListener(this)
+            appService?.contactRepository?.removeListener(contactsChangeListener)
+            unbindService(serviceConnection)
+            isBound = false
+        }
     }
 }
+
+

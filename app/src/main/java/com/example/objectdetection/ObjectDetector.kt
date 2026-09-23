@@ -13,7 +13,7 @@ import java.util.Collections
 
 class ObjectDetector(
     private val context: Context,
-    var confidenceThreshold: Float = 0.40f,
+    var confidenceThreshold: Float = 0.60f, // Strict 60% confidence rule
     var iouThreshold: Float = 0.45f
 ) {
     companion object {
@@ -50,7 +50,6 @@ class ObjectDetector(
 
     private fun loadModel() {
         try {
-            // Find model asset name (supporting both spellings)
             val assetList = context.assets.list("") ?: emptyArray()
             val modelName = when {
                 "object_recognizition_final.onnx" in assetList -> "object_recognizition_final.onnx"
@@ -60,7 +59,6 @@ class ObjectDetector(
 
             Log.i(TAG, "Loading object detection model: $modelName")
 
-            // Copy to internal cache for ONNX Session initialization
             val modelFile = File(context.cacheDir, modelName)
             if (!modelFile.exists() || modelFile.length() == 0L) {
                 context.assets.open(modelName).use { input ->
@@ -77,7 +75,6 @@ class ObjectDetector(
 
             ortSession = ortEnv.createSession(modelFile.absolutePath, sessionOptions)
 
-            // Log model inspection details
             ortSession?.let { session ->
                 Log.i(TAG, "--- ONNX Object Model Inputs ---")
                 for ((name, info) in session.inputInfo) {
@@ -90,7 +87,7 @@ class ObjectDetector(
                 }
             }
 
-            Log.i(TAG, "Object detection model initialized successfully.")
+            Log.i(TAG, "Object detection model initialized with confidenceThreshold = $confidenceThreshold")
         } catch (e: Exception) {
             Log.e(TAG, "Error loading ONNX Object Recognition model", e)
             throw RuntimeException("Failed to load Object Recognition ONNX model: ${e.message}", e)
@@ -150,7 +147,7 @@ class ObjectDetector(
     }
 
     /**
-     * Decodes [1, 49, 8400] output tensor, converts coordinates, and applies class-aware NMS.
+     * Decodes [1, 49, 8400] output tensor, converts coordinates, filters by 60% confidence, and applies class-aware NMS.
      */
     private fun decodeAndNms(buffer: FloatBuffer, preprocessResult: PreprocessResult): List<Detection> {
         val candidates = mutableListOf<Detection>()
@@ -162,14 +159,11 @@ class ObjectDetector(
 
         val numAnchors = NUM_ANCHORS
 
-        // Iterate through all 8400 candidate anchor predictions
         for (i in 0 until numAnchors) {
-            // Find class with maximum score among the 13 classes
             var maxClassScore = 0.0f
             var maxClassId = -1
 
             for (c in 0 until NUM_CLASSES) {
-                // channel index: 4 + c
                 val score = buffer.get((4 + c) * numAnchors + i)
                 if (score > maxClassScore) {
                     maxClassScore = score
@@ -177,13 +171,13 @@ class ObjectDetector(
                 }
             }
 
+            // Strict 60% confidence filter: only >= 0.60
             if (maxClassScore >= confidenceThreshold && maxClassId != -1) {
                 val cx = buffer.get(0 * numAnchors + i)
                 val cy = buffer.get(1 * numAnchors + i)
                 val w = buffer.get(2 * numAnchors + i)
                 val h = buffer.get(3 * numAnchors + i)
 
-                // Map letterboxed 640x640 coords back to original camera dimensions
                 val left = maxOf(0f, minOf(maxW, (cx - w / 2f - padX) / scale))
                 val top = maxOf(0f, minOf(maxH, (cy - h / 2f - padY) / scale))
                 val right = maxOf(0f, minOf(maxW, (cx + w / 2f - padX) / scale))
@@ -205,7 +199,6 @@ class ObjectDetector(
             }
         }
 
-        // Apply Class-Aware Non-Maximum Suppression (NMS)
         return applyClassAwareNms(candidates, iouThreshold)
     }
 
