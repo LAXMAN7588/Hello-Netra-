@@ -1,0 +1,21 @@
+# Built files
+*.iml
+.gradle/
+build/
+local.properties
+
+# IDE
+.idea/
+.cxx/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# APK
+*.apk
+
+# Misc
+captures/
+.externalNativeBuild/
+.navigation/
