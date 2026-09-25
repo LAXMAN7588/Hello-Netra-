@@ -20,13 +20,31 @@
         android:textColor="#FFFFFF"
         android:textSize="16sp" />
 
-    <Button
-        android:id="@+id/scanButton"
+    <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_margin="12dp"
-        android:text="SCAN TEXT"
-        android:textSize="18sp" />
+        android:orientation="horizontal"
+        android:padding="6dp">
+
+        <Button
+            android:id="@+id/scanButton"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:layout_margin="6dp"
+            android:text="SCAN TEXT"
+            android:textSize="16sp" />
+
+        <Button
+            android:id="@+id/testTtsButton"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:layout_margin="6dp"
+            android:text="TEST TTS"
+            android:textSize="16sp" />
+
+    </LinearLayout>
 
     <ScrollView
         android:layout_width="match_parent"

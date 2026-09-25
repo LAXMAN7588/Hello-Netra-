@@ -54,6 +54,7 @@ class MainActivity : Activity() {
 
     private lateinit var textureView: TextureView
     private lateinit var scanButton: Button
+    private lateinit var testTtsButton: Button
     private lateinit var statusText: TextView
     private lateinit var resultText: TextView
 
@@ -83,16 +84,22 @@ class MainActivity : Activity() {
 
         textureView = findViewById(R.id.textureView)
         scanButton = findViewById(R.id.scanButton)
+        testTtsButton = findViewById(R.id.testTtsButton)
         statusText = findViewById(R.id.statusText)
         resultText = findViewById(R.id.resultText)
 
-        statusText.text = "Loading OCR models..."
+        statusText.text = "Loading OCR & TTS models..."
         scanButton.isEnabled = false
+        testTtsButton.isEnabled = false
 
         textureView.surfaceTextureListener = surfaceTextureListener
 
         scanButton.setOnClickListener {
             captureText()
+        }
+
+        testTtsButton.setOnClickListener {
+            testTts()
         }
 
         loadOcr()
@@ -160,6 +167,7 @@ class MainActivity : Activity() {
                 }
 
                 scanButton.isEnabled = true
+                testTtsButton.isEnabled = true
 
             } catch (t: Throwable) {
                 statusText.text =
@@ -506,6 +514,19 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun testTts() {
+        val sampleText = "Hello, this is Hello-Netra. Optical character recognition is working correctly."
+        piperTTS?.stop()
+        statusText.text = "Testing TTS..."
+        piperTTS?.speak(sampleText) {
+            runOnUiThread {
+                if (!scanInProgress) {
+                    statusText.text = "Done"
+                }
+            }
+        }
+    }
+
     private val imageAvailableListener =
         ImageReader.OnImageAvailableListener { reader ->
 
@@ -554,10 +575,7 @@ class MainActivity : Activity() {
                             statusText.text =
                                 "Detected ${result.lineCount} line(s) • ${result.totalTimeMs} ms"
 
-                            val spokenText = result.results
-                                .map { it.text.trim() }
-                                .filter { it.isNotEmpty() }
-                                .joinToString(" ")
+                            val spokenText = SpeechTextFormatter.format(result.results)
 
                             if (spokenText.isNotBlank()) {
                                 statusText.text = "Speaking..."

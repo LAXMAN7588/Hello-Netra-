@@ -9,6 +9,7 @@ import android.media.AudioFormat
 import android.media.AudioTrack
 import android.os.SystemClock
 import android.util.Log
+import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
 import java.nio.FloatBuffer
@@ -19,119 +20,34 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
 /**
- * ONNX-based Text-To-Speech engine using Piper VITS model (en_US-ryan-medium.onnx).
+ * Piper VITS TTS engine using native eSpeak-NG for G2P (grapheme-to-phoneme)
+ * and the Indian English model (en_IN-hello-netra.onnx).
  *
- * Adapted from the original Hello-Netra ObjectDetection implementation for HelloNetraOCR.
+ * Pipeline:
+ *   text -> SpeechTextFormatter (unchanged) -> NativePhonemizer (eSpeak-NG JNI)
+ *        -> IPA phoneme string -> phoneme_id_map (from JSON) -> ONNX inference -> AudioTrack
+ *
+ * Technical Architecture & Model Interface:
+ * - Model: tts/en_IN-hello-netra.onnx (Piper VITS architecture)
+ * - Sample Rate: 22,050 Hz
+ * - Model Inputs:
+ *     1. "input": int64 [1, sequence_length] (phoneme IDs with BOS/PAD/EOS formatting)
+ *     2. "input_lengths": int64 [1] (total sequence length)
+ *     3. "scales": float32 [3] (noise_scale=0.667, length_scale, noise_w=0.8)
+ * - Model Output:
+ *     1. "output": float32 [1, 1, 1, num_samples] (Raw 22.05 kHz audio waveform)
  */
 class PiperTTS(private val context: Context) {
 
     companion object {
-        private const val TAG = "HelloNetraOCR"
+        private const val TAG = "PiperTTS"
         private const val SAMPLE_RATE = 22050
+        private const val SPEECH_LENGTH_SCALE = 1.15f
 
-        // Piper special control tokens
-        private const val PAD: Long = 0L
-        private const val BOS: Long = 1L
-        private const val EOS: Long = 2L
-        private const val SPACE: Long = 3L
-        private const val COMMA: Long = 8L
-        private const val PERIOD: Long = 10L
-
-        // Character to Direct Piper Phoneme ID map (from en_US-ryan-medium.onnx.json)
-        private val CHAR_PHONEME_MAP = mapOf(
-            ' ' to 3L,
-            '!' to 4L,
-            '\'' to 5L,
-            ',' to 8L,
-            '-' to 9L,
-            '.' to 10L,
-            ':' to 11L,
-            ';' to 12L,
-            '?' to 13L,
-            'a' to 14L,
-            'b' to 15L,
-            'c' to 16L,
-            'd' to 17L,
-            'e' to 18L,
-            'f' to 19L,
-            'h' to 20L,
-            'i' to 21L,
-            'j' to 22L,
-            'k' to 23L,
-            'l' to 24L,
-            'm' to 25L,
-            'n' to 26L,
-            'o' to 27L,
-            'p' to 28L,
-            'q' to 29L,
-            'r' to 30L,
-            's' to 31L,
-            't' to 32L,
-            'u' to 33L,
-            'v' to 34L,
-            'w' to 35L,
-            'x' to 36L,
-            'y' to 37L,
-            'z' to 38L,
-            '0' to 130L,
-            '1' to 131L,
-            '2' to 132L,
-            '3' to 133L,
-            '4' to 134L,
-            '5' to 135L,
-            '6' to 136L,
-            '7' to 137L,
-            '8' to 138L,
-            '9' to 139L
-        )
-
-        // Exact phoneme token sequences generated from official Piper phonemizer (en-us voice)
-        private val WORD_PHONEME_MAP = mapOf(
-            // Numbers
-            "zero" to longArrayOf(38, 120, 21, 59, 88, 27, 100),
-            "one" to longArrayOf(35, 121, 102, 26),
-            "two" to longArrayOf(32, 120, 33, 122),
-            "three" to longArrayOf(126, 88, 120, 21, 122),
-            "four" to longArrayOf(19, 120, 54, 122, 88),
-            "five" to longArrayOf(19, 120, 14, 74, 34),
-            "six" to longArrayOf(31, 120, 74, 23, 31),
-            "seven" to longArrayOf(31, 120, 61, 34, 59, 26),
-            "eight" to longArrayOf(120, 18, 74, 32),
-            "nine" to longArrayOf(26, 120, 14, 74, 26),
-            "ten" to longArrayOf(32, 120, 61, 26),
-            "eleven" to longArrayOf(128, 24, 120, 61, 34, 59, 26),
-            "twelve" to longArrayOf(32, 35, 120, 61, 24, 34),
-            "thirteen" to longArrayOf(126, 120, 62, 122, 32, 21, 122, 26),
-            "fourteen" to longArrayOf(19, 120, 54, 122, 88, 32, 21, 122, 26),
-            "fifteen" to longArrayOf(19, 120, 74, 19, 32, 21, 122, 26),
-            "sixteen" to longArrayOf(31, 120, 74, 23, 31, 32, 21, 122, 26),
-            "seventeen" to longArrayOf(31, 120, 61, 34, 59, 26, 32, 121, 21, 122, 26),
-            "eighteen" to longArrayOf(120, 18, 74, 32, 21, 122, 26),
-            "nineteen" to longArrayOf(26, 120, 14, 74, 26, 32, 21, 122, 26),
-            "twenty" to longArrayOf(32, 35, 120, 61, 26, 32, 21),
-            "thirty" to longArrayOf(126, 120, 62, 122, 92, 21),
-            "forty" to longArrayOf(19, 120, 54, 122, 88, 92, 21),
-            "fifty" to longArrayOf(19, 120, 74, 19, 32, 21),
-            "sixty" to longArrayOf(31, 120, 74, 23, 31, 32, 21),
-            "seventy" to longArrayOf(31, 120, 61, 34, 59, 26, 32, 21),
-            "eighty" to longArrayOf(120, 18, 74, 92, 21),
-            "ninety" to longArrayOf(26, 120, 14, 74, 26, 32, 21),
-            "hundred" to longArrayOf(20, 120, 102, 26, 17, 88, 74, 17),
-
-            // Words
-            "accident" to longArrayOf(120, 39, 23, 31, 74, 17, 59, 26, 32),
-            "and" to longArrayOf(39, 26, 17),
-            "architecture" to longArrayOf(120, 51, 122, 88, 23, 74, 32, 61, 23, 32, 62, 122, 88),
-            "detected" to longArrayOf(17, 74, 32, 120, 61, 23, 32, 128, 17),
-            "innovation" to longArrayOf(74, 26, 59, 34, 120, 18, 74, 124, 59, 26),
-            "meets" to longArrayOf(25, 120, 21, 122, 32, 31),
-            "no" to longArrayOf(26, 120, 27, 100),
-            "ocr" to longArrayOf(120, 27, 100, 31, 21, 122, 120, 51, 122, 88),
-            "ready" to longArrayOf(88, 120, 61, 17, 21),
-            "reading" to longArrayOf(88, 120, 21, 122, 17, 74, 44),
-            "simplicity" to longArrayOf(31, 74, 25, 28, 24, 74, 31, 74, 32, 21),
-            "text" to longArrayOf(32, 120, 61, 23, 31, 32)
-        )
+        // Piper special control tokens (same across all Piper models)
+        private const val PAD: Long = 0L   // "_"
+        private const val BOS: Long = 1L   // "^"
+        private const val EOS: Long = 2L   // "$"
     }
 
     private val ortEnv: OrtEnvironment = OrtEnvironment.getEnvironment()
@@ -143,18 +59,111 @@ class PiperTTS(private val context: Context) {
     private val currentSpeechId = AtomicLong(0L)
     private var lastInferenceTimeMs = 0L
 
+    // Parsed from en_IN-hello-netra.onnx.json at runtime
+    // Maps IPA phoneme string (possibly multi-codepoint) -> list of Piper IDs
+    private val phonemeIdMap = mutableMapOf<String, List<Long>>()
+
+    private var espeakReady = false
+
     init {
+        initEspeak()
+        loadPhonemeIdMap()
         loadModel()
+    }
+
+    /**
+     * Extracts espeak-ng-data from assets to cache and initializes native eSpeak-NG.
+     */
+    private fun initEspeak() {
+        try {
+            val espeakDataDir = File(context.cacheDir, "espeak-ng-data")
+
+            // Only extract if not already present (or if it's empty)
+            if (!espeakDataDir.exists() || espeakDataDir.list()?.isEmpty() != false) {
+                Log.i(TAG, "Extracting espeak-ng-data from assets...")
+                extractAssetDir("espeak-ng-data", espeakDataDir)
+                Log.i(TAG, "espeak-ng-data extracted to: ${espeakDataDir.absolutePath}")
+            }
+
+            // espeak_Initialize expects the path to the directory CONTAINING espeak-ng-data
+            val parentPath = context.cacheDir.absolutePath
+            Log.i(TAG, "Initializing eSpeak-NG with path: $parentPath")
+            espeakReady = NativePhonemizer.initializeEspeak(parentPath)
+            Log.i(TAG, "eSpeak-NG initialized: $espeakReady")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to initialize eSpeak-NG", e)
+            espeakReady = false
+        }
+    }
+
+    /**
+     * Recursively extracts an asset directory to a filesystem directory.
+     */
+    private fun extractAssetDir(assetPath: String, targetDir: File) {
+        targetDir.mkdirs()
+        val entries = context.assets.list(assetPath) ?: return
+        if (entries.isEmpty()) {
+            // It's a file
+            context.assets.open(assetPath).use { input ->
+                FileOutputStream(targetDir).use { output ->
+                    input.copyTo(output)
+                }
+            }
+            return
+        }
+        for (entry in entries) {
+            val childAssetPath = "$assetPath/$entry"
+            val childTarget = File(targetDir, entry)
+            val childEntries = context.assets.list(childAssetPath)
+            if (childEntries != null && childEntries.isNotEmpty()) {
+                // It's a subdirectory
+                extractAssetDir(childAssetPath, childTarget)
+            } else {
+                // It's a file
+                context.assets.open(childAssetPath).use { input ->
+                    FileOutputStream(childTarget).use { output ->
+                        input.copyTo(output)
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Parses the phoneme_id_map from the Piper JSON config.
+     * Each key is a phoneme string (single or multi-char IPA), each value is an array of IDs.
+     */
+    private fun loadPhonemeIdMap() {
+        try {
+            val jsonStr = context.assets.open("tts/en_IN-hello-netra.onnx.json")
+                .bufferedReader(Charsets.UTF_8).use { it.readText() }
+            val json = JSONObject(jsonStr)
+            val mapObj = json.getJSONObject("phoneme_id_map")
+            val keys = mapObj.keys()
+            while (keys.hasNext()) {
+                val key = keys.next()
+                val arr = mapObj.getJSONArray(key)
+                val ids = mutableListOf<Long>()
+                for (i in 0 until arr.length()) {
+                    ids.add(arr.getLong(i))
+                }
+                phonemeIdMap[key] = ids
+            }
+            Log.i(TAG, "Loaded phoneme_id_map with ${phonemeIdMap.size} entries")
+            Log.d(TAG, "Sample entries: 'a'->${phonemeIdMap["a"]}, 'ə'->${phonemeIdMap["ə"]}, 'ˈ'->${phonemeIdMap["ˈ"]}")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to load phoneme_id_map", e)
+        }
     }
 
     private fun loadModel() {
         try {
-            val modelName = "en_US-ryan-medium.onnx"
-            val modelFile = File(context.cacheDir, modelName)
+            val modelAssetPath = "tts/en_IN-hello-netra.onnx"
+            val modelFile = File(context.cacheDir, "en_IN-hello-netra.onnx")
 
             if (!modelFile.exists() || modelFile.length() == 0L) {
-                Log.i(TAG, "PiperTTS: Extracting model asset to cache: $modelName")
-                context.assets.open(modelName).use { input ->
+                Log.i(TAG, "Extracting TTS model asset to cache: $modelAssetPath")
+                context.assets.open(modelAssetPath).use { input ->
                     FileOutputStream(modelFile).use { output ->
                         input.copyTo(output)
                     }
@@ -167,80 +176,84 @@ class PiperTTS(private val context: Context) {
             }
 
             ortSession = ortEnv.createSession(modelFile.absolutePath, sessionOptions)
-            Log.i(TAG, "PiperTTS: Model loaded successfully (sampleRate=$SAMPLE_RATE)")
+
+            ortSession?.let { session ->
+                Log.i(TAG, "--- ONNX Piper TTS Model Inputs ---")
+                for ((name, info) in session.inputInfo) {
+                    Log.i(TAG, "TTS Input: $name -> $info")
+                }
+                Log.i(TAG, "--- ONNX Piper TTS Model Outputs ---")
+                for ((name, info) in session.outputInfo) {
+                    Log.i(TAG, "TTS Output: $name -> $info")
+                }
+            }
+
+            Log.i(TAG, "Piper TTS model loaded successfully (sampleRate=$SAMPLE_RATE Hz).")
         } catch (e: Exception) {
-            Log.e(TAG, "PiperTTS: Failed to load model: ${e.message}", e)
+            Log.e(TAG, "Failed to load Piper TTS model", e)
         }
     }
 
     fun getLastInferenceTimeMs(): Long = lastInferenceTimeMs
 
     /**
-     * Converts text (words, phrases, arbitrary OCR text) into Piper phoneme token IDs.
+     * Converts text into Piper phoneme token IDs using native eSpeak-NG G2P.
+     *
+     * Flow: text -> eSpeak-NG (native JNI) -> IPA phoneme string
+     *       -> iterate codepoints -> look up each in phoneme_id_map
+     *       -> intersperse PAD tokens -> wrap with BOS/EOS
      */
     fun textToPhonemeIds(text: String): LongArray {
+        if (!espeakReady || phonemeIdMap.isEmpty()) {
+            Log.e(TAG, "eSpeak not ready ($espeakReady) or phoneme map empty (${phonemeIdMap.size})")
+            return longArrayOf(BOS, PAD, EOS)
+        }
+
+        val ipaString = NativePhonemizer.textToPhonemes(text)
+        Log.d(TAG, "eSpeak IPA for '$text': '$ipaString'")
+
+        if (ipaString.isBlank()) {
+            Log.w(TAG, "eSpeak returned empty phonemes for: '$text'")
+            return longArrayOf(BOS, PAD, EOS)
+        }
+
         val tokens = mutableListOf<Long>()
         tokens.add(BOS)
         tokens.add(PAD)
 
-        val cleanText = text.lowercase().replace("-", " ").replace("—", " ")
-        val wordsAndPunct = cleanText.split(Regex("\\s+"))
-
-        var addedWord = false
-        for (rawItem in wordsAndPunct) {
-            var item = rawItem.trim()
-            if (item.isEmpty()) continue
-
-            var hasComma = false
-            var hasPeriod = false
-
-            if (item.endsWith(",")) {
-                hasComma = true
-                item = item.substring(0, item.length - 1)
-            } else if (item.endsWith(".")) {
-                hasPeriod = true
-                item = item.substring(0, item.length - 1)
-            }
-
-            val knownPhonemes = WORD_PHONEME_MAP[item]
-            if (knownPhonemes != null) {
-                if (addedWord) {
-                    tokens.add(SPACE)
-                    tokens.add(PAD)
-                }
-
-                for (id in knownPhonemes) {
-                    tokens.add(id)
-                    tokens.add(PAD)
-                }
-                addedWord = true
-            } else {
-                // Character-by-character phonetic synthesis for arbitrary OCR text
-                if (addedWord) {
-                    tokens.add(SPACE)
-                    tokens.add(PAD)
-                }
-
-                for (char in item) {
-                    val charToken = CHAR_PHONEME_MAP[char]
-                    if (charToken != null) {
-                        tokens.add(charToken)
+        // Parse the IPA string character by character.
+        // Some phonemes in the map are multi-codepoint (e.g. combining diacritics).
+        // We use a greedy longest-match strategy.
+        val codepoints = ipaString.codePoints().toArray()
+        var i = 0
+        while (i < codepoints.size) {
+            // Try longest match first (up to 3 codepoints)
+            var matched = false
+            val maxLen = minOf(3, codepoints.size - i)
+            for (len in maxLen downTo 1) {
+                val candidate = String(codepoints, i, len)
+                val ids = phonemeIdMap[candidate]
+                if (ids != null) {
+                    for (id in ids) {
+                        tokens.add(id)
                         tokens.add(PAD)
                     }
+                    i += len
+                    matched = true
+                    break
                 }
-                addedWord = true
             }
-
-            if (hasComma) {
-                tokens.add(COMMA)
-                tokens.add(PAD)
-            } else if (hasPeriod) {
-                tokens.add(PERIOD)
-                tokens.add(PAD)
+            if (!matched) {
+                // Skip unknown codepoint
+                val cp = String(codepoints, i, 1)
+                Log.w(TAG, "Unknown phoneme codepoint: '$cp' (U+${Integer.toHexString(codepoints[i])})")
+                i++
             }
         }
 
         tokens.add(EOS)
+
+        Log.d(TAG, "Phoneme IDs (${tokens.size} tokens): ${tokens.take(30)}...")
         return tokens.toLongArray()
     }
 
@@ -254,7 +267,7 @@ class PiperTTS(private val context: Context) {
     }
 
     /**
-     * Synthesizes audio and plays it asynchronously off the UI thread.
+     * Synthesizes audio and plays it asynchronously off the UI thread without blocking camera or UI.
      */
     fun speak(text: String, onComplete: (() -> Unit)? = null) {
         val trimmed = text.trim()
@@ -263,7 +276,9 @@ class PiperTTS(private val context: Context) {
             return
         }
 
-        Log.d(TAG, "PiperTTS: Received text to speak: '$trimmed'")
+        Log.d("HelloNetraOCR", "Speech input: '$trimmed'")
+        Log.d("HelloNetraOCR", "Speech length scale: $SPEECH_LENGTH_SCALE")
+        Log.d(TAG, "Text sent to Piper: '$trimmed'")
         val speechId = currentSpeechId.incrementAndGet()
 
         executor.execute {
@@ -276,6 +291,8 @@ class PiperTTS(private val context: Context) {
             isSpeaking.set(true)
             try {
                 val phonemeIds = textToPhonemeIds(trimmed)
+                Log.d(TAG, "Phoneme token sequence length: ${phonemeIds.size}")
+
                 if (phonemeIds.size <= 3 || speechId != currentSpeechId.get()) {
                     isSpeaking.set(false)
                     onComplete?.invoke()
@@ -290,12 +307,13 @@ class PiperTTS(private val context: Context) {
                 }
 
                 if (audioSamples != null && audioSamples.isNotEmpty()) {
-                    val durationMs = (audioSamples.size.toDouble() / SAMPLE_RATE * 1000).toLong()
-                    Log.d(TAG, "PiperTTS: Generated audio: sampleRate=$SAMPLE_RATE, samplesCount=${audioSamples.size}, durationMs=$durationMs")
+                    Log.d(TAG, "Output sample count: ${audioSamples.size}")
+                    Log.d(TAG, "Sample rate: $SAMPLE_RATE Hz")
+                    Log.d(TAG, "AudioTrack format: MONO 16-bit PCM @ $SAMPLE_RATE Hz")
                     playAudio(audioSamples, speechId)
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "PiperTTS: Error during speech synthesis: ${e.message}", e)
+                Log.e(TAG, "Error during TTS speech synthesis", e)
             } finally {
                 isSpeaking.set(false)
                 onComplete?.invoke()
@@ -304,10 +322,7 @@ class PiperTTS(private val context: Context) {
     }
 
     private fun synthesize(phonemeIds: LongArray): FloatArray? {
-        val session = ortSession ?: run {
-            Log.e(TAG, "PiperTTS: Cannot synthesize, ONNX session is null")
-            return null
-        }
+        val session = ortSession ?: return null
 
         val startTime = SystemClock.uptimeMillis()
 
@@ -331,7 +346,7 @@ class PiperTTS(private val context: Context) {
                 longArrayOf(1)
             )
 
-            val scalesBuffer = FloatBuffer.wrap(floatArrayOf(0.667f, 1.0f, 0.8f))
+            val scalesBuffer = FloatBuffer.wrap(floatArrayOf(0.667f, SPEECH_LENGTH_SCALE, 0.8f))
             scalesTensor = OnnxTensor.createTensor(
                 ortEnv,
                 scalesBuffer,
@@ -346,6 +361,7 @@ class PiperTTS(private val context: Context) {
 
             result = session.run(inputs)
             lastInferenceTimeMs = SystemClock.uptimeMillis() - startTime
+            Log.d(TAG, "Model inference duration: ${lastInferenceTimeMs} ms")
 
             val outputTensor = result.get(0) as? OnnxTensor ?: return null
             val buffer = outputTensor.floatBuffer
@@ -354,7 +370,7 @@ class PiperTTS(private val context: Context) {
 
             return audioSamples
         } catch (e: Exception) {
-            Log.e(TAG, "PiperTTS: ONNX inference error: ${e.message}", e)
+            Log.e(TAG, "TTS ONNX inference error", e)
             return null
         } finally {
             inputTensor?.close()
@@ -397,7 +413,7 @@ class PiperTTS(private val context: Context) {
                 .setTransferMode(AudioTrack.MODE_STATIC)
                 .build()
         } catch (e: Exception) {
-            Log.e(TAG, "PiperTTS: Failed to create AudioTrack: ${e.message}", e)
+            Log.e(TAG, "Failed to create AudioTrack", e)
             return
         }
 
@@ -410,7 +426,7 @@ class PiperTTS(private val context: Context) {
 
         try {
             audioTrack.write(shortBuffer, 0, shortBuffer.size)
-            Log.d(TAG, "PiperTTS: Playback started")
+            Log.d(TAG, "Playback started")
             audioTrack.play()
 
             val durationMs = (shortBuffer.size.toDouble() / SAMPLE_RATE * 1000).toLong()
@@ -421,9 +437,9 @@ class PiperTTS(private val context: Context) {
                 }
                 Thread.sleep(30)
             }
-            Log.d(TAG, "PiperTTS: Playback ended (completed: ${speechId == currentSpeechId.get()})")
+            Log.d(TAG, "Playback ended")
         } catch (e: Exception) {
-            Log.e(TAG, "PiperTTS: Playback error: ${e.message}", e)
+            Log.e(TAG, "Playback error", e)
         } finally {
             try {
                 audioTrack.stop()
@@ -435,7 +451,7 @@ class PiperTTS(private val context: Context) {
         }
     }
 
-    private fun stopCurrentAudio() {
+    fun stopCurrentAudio() {
         try {
             currentAudioTrack?.let {
                 it.stop()
@@ -443,7 +459,7 @@ class PiperTTS(private val context: Context) {
             }
             currentAudioTrack = null
         } catch (e: Exception) {
-            Log.w(TAG, "PiperTTS: Error stopping audio track: ${e.message}")
+            Log.w(TAG, "Error stopping audio track", e)
         }
     }
 
@@ -453,7 +469,7 @@ class PiperTTS(private val context: Context) {
         try {
             ortSession?.close()
         } catch (e: Exception) {
-            Log.e(TAG, "PiperTTS: Error closing session: ${e.message}", e)
+            Log.e(TAG, "Error closing Piper TTS", e)
         }
     }
 }
