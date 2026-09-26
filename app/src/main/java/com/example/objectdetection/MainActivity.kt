@@ -47,7 +47,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
         private const val PREFS_NAME = "object_detection_prefs"
         private const val PREF_KEY_PI_IP = "saved_pi_ip"
         private const val DEFAULT_PI_IP = "192.168.1.100"
-        private const val DEFAULT_PI_PORT = 8000
+        private const val DEFAULT_PI_PORT = 5000
         private const val TOTAL_PI_FRAMES = 6
         private const val STATUS_TIMEOUT_MS = 30000L
         private const val STATUS_POLL_INTERVAL_MS = 250L
@@ -104,6 +104,8 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private var isPiMode = false
     private var piDetectionJob: Job? = null
     private var currentState = PiState.IDLE
+    private var piFrameServer: LocalFrameServer? = null
+    private val piFrameBuffer = LatestFrameBuffer()
     private lateinit var sharedPreferences: SharedPreferences
 
     // Phone Camera Metrics
@@ -278,7 +280,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private fun switchToPhoneCameraMode() {
         isPiMode = false
         cancelPiJob()
-
+        stopPiStreamServer()
         previewView.visibility = View.VISIBLE
         frameView.visibility = View.GONE
         piControlPanel.visibility = View.GONE
@@ -299,7 +301,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     private fun switchToPiMode() {
         isPiMode = true
         stopCamera()
-
+        startPiStreamServer()
         previewView.visibility = View.GONE
         frameView.visibility = View.VISIBLE
         piControlPanel.visibility = View.VISIBLE
@@ -437,210 +439,356 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
     // ============================================================
     // RASPBERRY PI 6-FRAME RECOGNITION CYCLE
     // ============================================================
+    private fun startPiStreamServer() {
+        if (piFrameServer != null) {
+            Log.d(TAG, "[PI] Frame server already running")
+            return
+        }
 
+        piFrameBuffer.resetCounters()
+
+        val server = LocalFrameServer(
+            port = DEFAULT_PI_PORT,
+            onConnectionStateChanged = { state ->
+                runOnUiThread {
+                    when (state) {
+                        LocalFrameServer.ConnectionState.Stopped -> {
+                            piStatusText.text = "Pi Server: Stopped"
+                        }
+
+                        is LocalFrameServer.ConnectionState.Listening -> {
+                            piStatusText.text =
+                                "Pi Server: Listening :${state.port}"
+                        }
+
+                        is LocalFrameServer.ConnectionState.Connected -> {
+                            piStatusText.text =
+                                "Raspberry Pi: Connected"
+                        }
+
+                        is LocalFrameServer.ConnectionState.Disconnected -> {
+                            piStatusText.text =
+                                "Raspberry Pi: Disconnected"
+                        }
+
+                        is LocalFrameServer.ConnectionState.Error -> {
+                            piStatusText.text =
+                                "Pi Server Error: ${state.message}"
+                        }
+                    }
+                }
+            },
+            onFrameReceived = { packet ->
+                if (isPiMode) {
+                    piFrameBuffer.offer(packet)
+                }
+            }
+        )
+
+        piFrameServer = server
+        server.start()
+
+        Log.i(TAG, "[PI] TCP frame server started on port $DEFAULT_PI_PORT")
+    }
     private fun startPiDetectionCycle() {
-        if (currentState != PiState.IDLE && currentState != PiState.FINISHED && currentState != PiState.ERROR) {
+
+        if (currentState != PiState.IDLE &&
+            currentState != PiState.FINISHED &&
+            currentState != PiState.ERROR
+        ) {
             Log.d(TAG, "[PI] Recognition cycle already in progress")
             return
         }
 
-        val rawInput = piIpAddress.text.toString().trim()
-        if (rawInput.isEmpty()) {
-            setPiState(PiState.ERROR, "Raspberry Pi: Enter IP address", true)
+        if (!isPiMode) {
+            setPiState(
+                PiState.ERROR,
+                "Raspberry Pi mode is not active",
+                true
+            )
             return
         }
 
-        // Parse and sanitize IP / URL
-        val formattedBaseUrl = formatPiBaseUrl(rawInput)
-        val cleanHost = extractHost(rawInput)
-
-        // Save valid IP to SharedPreferences
-        sharedPreferences.edit().putString(PREF_KEY_PI_IP, cleanHost).apply()
-
-        // Reset UI metrics for new cycle
         detectionOverlay.clearDetections()
-        frameStatsText.text = "Frames: 0 / $TOTAL_PI_FRAMES"
-        countText.text = "Objects Detected: 0"
-        breakdownText.text = "Detections: Waiting..."
-        ttsStatusText.text = "TTS: Processing..."
-        inferenceText.text = "Inference: -- ms | Total: -- ms"
 
-        setPiState(PiState.STARTING, "Raspberry Pi: Connecting to $cleanHost:$DEFAULT_PI_PORT...")
+        frameStatsText.text =
+            "Frames: 0 / $TOTAL_PI_FRAMES"
 
-        val cycleStartTime = SystemClock.elapsedRealtime()
+        countText.text =
+            "Objects Detected: 0"
 
-        piDetectionJob = lifecycleScope.launch(Dispatchers.IO) {
-            try {
-                Log.i(TAG, "[PI] Connecting to $formattedBaseUrl")
+        breakdownText.text =
+            "Detections: Waiting..."
 
-                // ----------------------------------------------------
-                // Step 1: Query initial status
-                // ----------------------------------------------------
-                var status = fetchPiStatus(formattedBaseUrl)
-                Log.i(TAG, "[PI] Status = $status")
+        ttsStatusText.text =
+            "TTS: Processing..."
 
-                if (status == "unknown") {
-                    throw Exception("Cannot connect to Raspberry Pi at $formattedBaseUrl")
-                }
+        inferenceText.text =
+            "Inference: -- ms | Total: -- ms"
 
-                // ----------------------------------------------------
-                // Step 2: Wait for Pi capture cycle (status: waiting -> capturing -> done)
-                // ----------------------------------------------------
-                val waitStart = SystemClock.elapsedRealtime()
-                while (status != "done") {
-                    if (SystemClock.elapsedRealtime() - waitStart > STATUS_TIMEOUT_MS) {
-                        throw Exception("Raspberry Pi capture timeout (>30s)")
-                    }
+        piFrameBuffer.clear()
 
-                    when (status) {
-                        "waiting" -> setPiState(PiState.WAITING_FOR_PI, "Waiting for Raspberry Pi...")
-                        "capturing" -> setPiState(PiState.CAPTURING, "Capturing frames...")
-                        "error" -> throw Exception("Camera error reported by Raspberry Pi")
-                    }
+        setPiState(
+            PiState.STARTING,
+            "Waiting for Raspberry Pi stream..."
+        )
 
-                    delay(STATUS_POLL_INTERVAL_MS)
-                    status = fetchPiStatus(formattedBaseUrl)
-                    Log.d(TAG, "[PI] Status = $status")
+        val cycleStartTime =
+            SystemClock.elapsedRealtime()
 
-                    if (status == "unknown") {
-                        throw Exception("Lost connection to Raspberry Pi during capture")
-                    }
-                }
+        piDetectionJob =
+            lifecycleScope.launch(Dispatchers.IO) {
 
-                setPiState(PiState.DOWNLOADING, "Downloading frames...")
+                try {
 
-                // ----------------------------------------------------
-                // Step 3: Download & Process exactly 6 frames sequentially
-                // ----------------------------------------------------
-                val allFrameDetections = mutableListOf<List<Detection>>()
-                var totalInferenceTimeMs = 0L
-                var totalDownloadTimeMs = 0L
+                    val allFrameDetections =
+                        mutableListOf<List<Detection>>()
 
-                for (frameIndex in 0 until TOTAL_PI_FRAMES) {
-                    val frameNumber = frameIndex + 1
-                    val frameName = String.format("frame_%02d.jpg", frameIndex)
-                    val frameUrl = "$formattedBaseUrl/$frameName?t=${System.currentTimeMillis()}"
+                    var totalInferenceTimeMs =
+                        0L
 
-                    setPiState(
-                        PiState.DOWNLOADING,
-                        "Raspberry Pi: Downloading $frameName ($frameNumber/$TOTAL_PI_FRAMES)"
-                    )
-                    Log.i(TAG, "[PI] Downloading $frameName")
+                    for (frameIndex in 0 until TOTAL_PI_FRAMES) {
 
-                    val dlStart = SystemClock.elapsedRealtime()
-                    val frameBitmap = downloadBitmap(frameUrl)
-                        ?: throw Exception("Failed to download $frameName from $frameUrl")
-                    val dlTime = SystemClock.elapsedRealtime() - dlStart
-                    totalDownloadTimeMs += dlTime
+                        val frameNumber =
+                            frameIndex + 1
 
-                    try {
                         setPiState(
-                            PiState.DETECTING,
-                            "Raspberry Pi: Processing frame $frameNumber/$TOTAL_PI_FRAMES"
+                            PiState.WAITING_FOR_PI,
+                            "Waiting for Pi frame $frameNumber/$TOTAL_PI_FRAMES"
                         )
-                        Log.i(TAG, "[DETECT] Processing frame $frameNumber/$TOTAL_PI_FRAMES")
 
-                        withContext(Dispatchers.Main) {
-                            frameView.setImageBitmap(frameBitmap)
+                        val deadline =
+                            SystemClock.elapsedRealtime() + 5000L
+
+                        var packet: FramePacket? = null
+
+                        while (
+                            packet == null &&
+                            SystemClock.elapsedRealtime() < deadline
+                        ) {
+
+                            packet =
+                                piFrameBuffer.poll()
+
+                            if (packet == null) {
+                                delay(20L)
+                            }
                         }
 
-                        // Preprocess 1920x1080 -> 640x640 CHW
-                        val preprocessResult = imagePreprocessor?.preprocess(frameBitmap)
-                            ?: throw Exception("Image preprocessing failed for $frameName")
-
-                        // ONNX Inference on all model classes
-                        val detectionResult = objectDetector?.detect(preprocessResult)
-                            ?: throw Exception("ONNX detection returned null for $frameName")
-
-                        val detections = detectionResult.detections
-                        allFrameDetections.add(detections)
-                        totalInferenceTimeMs += detectionResult.inferenceTimeMs
-
-                        Log.i(TAG, "[DETECT] Inference = ${detectionResult.inferenceTimeMs} ms (${detections.size} objects)")
-
-                        val frameSummary = buildCountsSummary(detections)
-                        val ramMb = calculateRamUsageMb()
-
-                        withContext(Dispatchers.Main) {
-                            detectionOverlay.setDetections(detections, frameBitmap.width, frameBitmap.height)
-                            frameStatsText.text = "Frame $frameNumber / $TOTAL_PI_FRAMES"
-                            countText.text = "Frame $frameNumber Objects: ${detections.size}"
-                            breakdownText.text = "Frame $frameNumber: $frameSummary"
-                            inferenceText.text = "Inference: ${detectionResult.inferenceTimeMs}ms | RAM: ${ramMb}MB"
-                            ramText.text = "RAM: ${ramMb}MB"
+                        if (packet == null) {
+                            throw Exception(
+                                "Timed out waiting for Pi frame $frameNumber"
+                            )
                         }
-                    } finally {
-                        // Release temporary bitmap memory for intermediate frames to prevent high RAM consumption
-                        if (frameIndex != TOTAL_PI_FRAMES - 1) {
+
+                        if (packet.format.toInt() != 1) {
+                            throw Exception(
+                                "Unsupported Pi frame format: ${packet.format}"
+                            )
+                        }
+
+                        Log.i(
+                            TAG,
+                            "[PI] Frame ${packet.frameId} received: " +
+                                    "${packet.jpegData.size / 1024} KB"
+                        )
+
+                        val frameBitmap =
+                            BitmapFactory.decodeByteArray(
+                                packet.jpegData,
+                                0,
+                                packet.jpegData.size
+                            )
+                                ?: throw Exception(
+                                    "Failed to decode Pi JPEG frame"
+                                )
+
+                        try {
+
+                            setPiState(
+                                PiState.DETECTING,
+                                "Processing frame $frameNumber/$TOTAL_PI_FRAMES"
+                            )
+
+                            withContext(Dispatchers.Main) {
+                                frameView.setImageBitmap(
+                                    frameBitmap
+                                )
+                            }
+
+                            val preprocessResult =
+                                imagePreprocessor?.preprocess(
+                                    frameBitmap
+                                )
+                                    ?: throw Exception(
+                                        "Image preprocessing failed"
+                                    )
+
+                            val detectionResult =
+                                objectDetector?.detect(
+                                    preprocessResult
+                                )
+                                    ?: throw Exception(
+                                        "Object detection failed"
+                                    )
+
+                            val detections =
+                                detectionResult.detections
+
+                            allFrameDetections.add(
+                                detections
+                            )
+
+                            totalInferenceTimeMs +=
+                                detectionResult.inferenceTimeMs
+
+                            val frameSummary =
+                                buildCountsSummary(
+                                    detections
+                                )
+
+                            val ramMb =
+                                calculateRamUsageMb()
+
+                            withContext(Dispatchers.Main) {
+
+                                detectionOverlay.setDetections(
+                                    detections,
+                                    frameBitmap.width,
+                                    frameBitmap.height
+                                )
+
+                                frameStatsText.text =
+                                    "Frame $frameNumber / $TOTAL_PI_FRAMES"
+
+                                countText.text =
+                                    "Frame $frameNumber Objects: ${detections.size}"
+
+                                breakdownText.text =
+                                    "Frame $frameNumber: $frameSummary"
+
+                                inferenceText.text =
+                                    "Inference: ${detectionResult.inferenceTimeMs}ms"
+
+                                ramText.text =
+                                    "RAM: ${ramMb}MB"
+                            }
+
+                        } finally {
+
                             frameBitmap.recycle()
                         }
                     }
-                }
 
-                Log.i(TAG, "[DETECT] Cycle complete. Aggregating results across $TOTAL_PI_FRAMES frames...")
+                    val finalAggregatedCounts =
+                        aggregatePiDetections(
+                            allFrameDetections
+                        )
 
-                // ----------------------------------------------------
-                // Step 4: Aggregate detections across all 6 frames
-                // ----------------------------------------------------
-                val finalAggregatedCounts = aggregatePiDetections(allFrameDetections)
-                val totalCycleTimeMs = SystemClock.elapsedRealtime() - cycleStartTime
+                    val totalCycleTimeMs =
+                        SystemClock.elapsedRealtime() -
+                                cycleStartTime
 
-                Log.i(TAG, "[DETECT] FINAL AGGREGATED COUNTS = $finalAggregatedCounts (Total cycle time: ${totalCycleTimeMs}ms)")
+                    Log.i(
+                        TAG,
+                        "[PI] FINAL COUNTS = $finalAggregatedCounts"
+                    )
 
-                // ----------------------------------------------------
-                // Step 5: Format TTS announcement
-                // ----------------------------------------------------
-                val announcementPhrase = buildFinalAnnouncementPhrase(finalAggregatedCounts)
+                    val announcementPhrase =
+                        buildFinalAnnouncementPhrase(
+                            finalAggregatedCounts
+                        )
 
-                // ----------------------------------------------------
-                // Step 6: Update UI with final scene summary
-                // ----------------------------------------------------
-                withContext(Dispatchers.Main) {
-                    setPiState(PiState.FINISHED, "Raspberry Pi: Detection Complete")
+                    withContext(Dispatchers.Main) {
 
-                    frameStatsText.text = "Frames: $TOTAL_PI_FRAMES / $TOTAL_PI_FRAMES"
-                    inferenceText.text = "Inference Avg: ${totalInferenceTimeMs / TOTAL_PI_FRAMES}ms | Total: ${totalCycleTimeMs}ms"
-                    ramText.text = "RAM: ${calculateRamUsageMb()}MB"
+                        setPiState(
+                            PiState.FINISHED,
+                            "Raspberry Pi: Detection Complete"
+                        )
 
-                    if (finalAggregatedCounts.isEmpty()) {
-                        countText.text = "Final Objects: 0"
-                        breakdownText.text = "Final Counts: None"
-                    } else {
-                        val totalCount = finalAggregatedCounts.values.sum()
-                        countText.text = "Final Objects: $totalCount"
-                        val dynamicList = finalAggregatedCounts.entries.joinToString(" | ") { (label, count) ->
-                            "${label.capitalizeWords()}: $count"
+                        frameStatsText.text =
+                            "Frames: $TOTAL_PI_FRAMES / $TOTAL_PI_FRAMES"
+
+                        inferenceText.text =
+                            "Inference Avg: " +
+                                    "${totalInferenceTimeMs / TOTAL_PI_FRAMES}ms | " +
+                                    "Total: ${totalCycleTimeMs}ms"
+
+                        ramText.text =
+                            "RAM: ${calculateRamUsageMb()}MB"
+
+                        if (finalAggregatedCounts.isEmpty()) {
+
+                            countText.text =
+                                "Final Objects: 0"
+
+                            breakdownText.text =
+                                "Final Counts: None"
+
+                        } else {
+
+                            val totalCount =
+                                finalAggregatedCounts.values.sum()
+
+                            countText.text =
+                                "Final Objects: $totalCount"
+
+                            val dynamicList =
+                                finalAggregatedCounts.entries
+                                    .joinToString(" | ") { (label, count) ->
+                                        "${label.capitalizeWords()}: $count"
+                                    }
+
+                            breakdownText.text =
+                                "Final Counts:\n$dynamicList"
                         }
-                        breakdownText.text = "Final Counts:\n$dynamicList"
+
+                        speakAnnouncement(
+                            announcementPhrase
+                        )
+
+                        setPiState(
+                            PiState.IDLE,
+                            "Raspberry Pi: Ready"
+                        )
                     }
 
-                    // ------------------------------------------------
-                    // Step 7: Announce final result once via TTS
-                    // ------------------------------------------------
-                    speakAnnouncement(announcementPhrase)
+                } catch (e: Exception) {
 
-                    // Re-enable Object Recognition button & return to IDLE
-                    setPiState(PiState.IDLE, "Raspberry Pi: Ready for next cycle")
-                }
+                    Log.e(
+                        TAG,
+                        "[PI] Detection cycle error",
+                        e
+                    )
 
-            } catch (e: Exception) {
-                Log.e(TAG, "[PI] Detection cycle error: ${e.message}", e)
-                withContext(Dispatchers.Main) {
-                    val userErrorMsg = when {
-                        e.message?.contains("connect", ignoreCase = true) == true -> "Cannot connect to Raspberry Pi"
-                        e.message?.contains("download", ignoreCase = true) == true -> e.message ?: "Download failed"
-                        e.message?.contains("timeout", ignoreCase = true) == true -> "Connection timed out"
-                        else -> e.message ?: "Unknown error occurred"
+                    withContext(Dispatchers.Main) {
+
+                        setPiState(
+                            PiState.ERROR,
+                            "Raspberry Pi: ${
+                                e.message ?: "Unknown error"
+                            }",
+                            true
+                        )
+
+                        ttsStatusText.text =
+                            "TTS: Error"
                     }
-                    setPiState(PiState.ERROR, "Raspberry Pi: $userErrorMsg", true)
-                    ttsStatusText.text = "TTS: Error"
+
+                } finally {
+
+                    piDetectionJob = null
                 }
-            } finally {
-                piDetectionJob = null
             }
-        }
     }
+    private fun stopPiStreamServer() {
+        piFrameBuffer.clear()
 
+        piFrameServer?.release()
+        piFrameServer = null
+
+        Log.i(TAG, "[PI] TCP frame server stopped")
+    }
     private fun cancelPiJob() {
         piDetectionJob?.cancel()
         piDetectionJob = null
@@ -891,6 +1039,7 @@ class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
 
     override fun onDestroy() {
         cancelPiJob()
+        stopPiStreamServer()
         stopCamera()
         cameraExecutor.shutdown()
 
