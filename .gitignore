@@ -1,0 +1,36 @@
+# Android Studio
+.idea/
+*.iml
+
+# Gradle
+.gradle/
+build/
+*/build/
+
+# Local configuration
+local.properties
+
+# Android generated files
+.externalNativeBuild/
+.cxx/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# APKs
+*.apk
+*.aab
+
+# Keystore / signing files
+*.jks
+*.keystore
+
+# Large ML/model files
+*.onnx
+*.pt
+*.pth
+
+# Python cache
+__pycache__/
+*.pyc
